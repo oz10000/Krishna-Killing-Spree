@@ -3,7 +3,7 @@
 
 """
 KRISHNA KILLING SPREE — MAIN.PY COMPLETO
-Versión con corrección de balance, TradeTrace y loop resiliente.
+Versión con corrección de serialización y logs detallados de OKX.
 """
 
 import os
@@ -132,6 +132,16 @@ class TradeTrace:
             return "EXCHANGE_ISSUE: Respuesta de OKX con error"
         else:
             return f"UNKNOWN (step: {self.fail_step})"
+
+    def to_dict(self) -> Dict:
+        """Convierte el objeto a diccionario para serialización JSON."""
+        return {
+            'success': self.success,
+            'fail_step': self.fail_step,
+            'fail_reason': self.fail_reason,
+            'steps_completed': list(self.steps.keys()),
+            'diagnosis': self.diagnose()
+        }
 
 # ============================================================
 # BOT PRINCIPAL
@@ -444,14 +454,21 @@ class KrishnaKillingSpree:
                     trace.log_step("ORDER_SENT", {"response": order_res})
                     self.stats['orders_sent'] += 1
 
-                    # OKX_RESPONSE
+                    # OKX_RESPONSE — CON LOG DETALLADO
                     if not order_res.get('ok'):
-                        trace.log_fail("OKX_RESPONSE", f"OKX error: {order_res.get('error')}")
-                        self.stats['okx_rejections'] += 1
-                        result['reason'] = 'OKX_REJECTED'
+                        error_msg = order_res.get('error', 'Unknown error')
                         raw = order_res.get('raw')
                         if raw:
+                            # Extraer mensaje detallado de OKX
+                            sMsg = ''
+                            if 'data' in raw and raw['data']:
+                                sMsg = raw['data'][0].get('sMsg', '')
+                            if sMsg:
+                                error_msg = f"{error_msg} | sMsg: {sMsg}"
                             log_error(f"OKX Raw: {json.dumps(raw, indent=2)}")
+                        trace.log_fail("OKX_RESPONSE", f"OKX error: {error_msg}")
+                        self.stats['okx_rejections'] += 1
+                        result['reason'] = f'OKX_REJECTED: {error_msg}'
                         return result
 
                     trace.log_success("OKX_RESPONSE", {"ordId": order_res.get('data', [{}])[0].get('ordId')})
@@ -519,7 +536,7 @@ class KrishnaKillingSpree:
             log_error(f"Error en cleanup: {e}")
 
     # ============================================================
-    # PNL Y MÉTRICAS
+    # PNL Y MÉTRICAS (CORREGIDA — SERIALIZACIÓN DE TRACES)
     # ============================================================
     def _append_pnl_row(self, equity: float, pnl_total: float, pnl_ejecucion: float,
                         trades: int, modo: str) -> None:
@@ -544,13 +561,31 @@ class KrishnaKillingSpree:
     def _save_metrics(self) -> None:
         os.makedirs(METRICS_DIR, exist_ok=True)
         filename = f"{METRICS_DIR}/report_final_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
+
+        # Convertir objetos TradeTrace a diccionarios serializables
+        traces_serializable = [trace.to_dict() for trace in self.stats['traces']]
+
+        stats_serializable = {
+            'symbols_processed': self.stats['symbols_processed'],
+            'signals_generated': self.stats['signals_generated'],
+            'orders_attempted': self.stats['orders_attempted'],
+            'orders_sent': self.stats['orders_sent'],
+            'okx_rejections': self.stats['okx_rejections'],
+            'blocked_by_strategy': self.stats['blocked_by_strategy'],
+            'blocked_by_validator': self.stats['blocked_by_validator'],
+            'blocked_by_risk': self.stats['blocked_by_risk'],
+            'blocked_by_cooldown': self.stats['blocked_by_cooldown'],
+            'invalid_symbols': self.stats['invalid_symbols'],
+            'traces': traces_serializable
+        }
+
         with open(filename, 'w') as f:
             json.dump({
                 'trades_count': self.trades_count,
                 'pnl_total': self.pnl_total,
                 'capital': self.capital,
-                'stats': self.stats
-            }, f, indent=2)
+                'stats': stats_serializable
+            }, f, indent=2, default=str)
 
     # ============================================================
     # DIAGNÓSTICO
