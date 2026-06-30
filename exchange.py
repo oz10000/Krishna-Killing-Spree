@@ -1,9 +1,10 @@
 # exchange.py
 # ============================================================
-# CLIENTE OKX V5 — REGENERADO PARA KRISHNA KILLING SPREE
+# CLIENTE OKX V5 — KRISHNA KILLING SPREE (REGENERADO)
 # ============================================================
 # Basado en el cliente funcional de BlackBirdOfPrey.
 # Compatible con OKX API V5, Demo y Producción.
+# Incluye todas las correcciones necesarias para órdenes.
 # ============================================================
 
 import hmac
@@ -41,6 +42,17 @@ class Exchange:
         self._instrument_cache = {}
         self._account_mode = None
         self._account_mode_fetched = False
+
+    # ============================================================
+    # UTILIDADES DE SÍMBOLOS
+    # ============================================================
+
+    def _instrument_id(self, symbol: str) -> str:
+        """Convierte símbolos al formato OKX V5 (BTC → BTC-USDT-SWAP)."""
+        symbol = symbol.upper().strip()
+        if symbol.endswith("-USDT-SWAP"):
+            return symbol
+        return f"{symbol}-USDT-SWAP"
 
     # ============================================================
     # AUTENTICACIÓN Y FIRMA
@@ -346,10 +358,28 @@ class Exchange:
             return {'ok': False, 'data': []}
         return {'ok': True, 'data': result.get('data', [])}
 
+    # ============================================================
+    # ÓRDENES (CORREGIDAS SEGÚN OKX V5)
+    # ============================================================
+
     def place_market_order(self, symbol: str, side: str, size: float) -> Dict:
-        """Coloca una orden de mercado. side: 'buy' o 'sell'."""
-        body = {'instId': symbol, 'side': side, 'ordType': 'market', 'size': str(size)}
-        result = self._request('POST', '/api/v5/trade/order', body=body)
+        """
+        Coloca una orden de mercado en OKX V5.
+        Incluye tdMode, posSide, y usa el campo 'sz' (no 'size').
+        """
+        inst = self._instrument_id(symbol)
+        pos_side = "long" if side.lower() == "buy" else "short"
+
+        body = {
+            "instId": inst,
+            "tdMode": "cross",
+            "side": side.lower(),
+            "posSide": pos_side,
+            "ordType": "market",
+            "sz": str(size),
+        }
+
+        result = self._request("POST", "/api/v5/trade/order", body=body)
         if result.get('ok'):
             data = result.get('data', [{}])[0]
             return {'ok': True, 'order_id': data.get('ordId'), 'data': data}
@@ -358,18 +388,25 @@ class Exchange:
     def place_conditional_order(self, symbol: str, side: str, size: float,
                                 trigger_price: float, order_price: str = '-1',
                                 trigger_px_type: str = 'last', pos_side: str = 'long') -> Dict:
-        """Coloca una orden condicional (TP/SL)."""
+        """
+        Coloca una orden condicional (TP/SL) en OKX V5.
+        Usa ordType 'trigger' (no 'conditional').
+        """
+        inst = self._instrument_id(symbol)
+
         body = {
-            'instId': symbol,
-            'side': side,
-            'ordType': 'conditional',
-            'size': str(size),
-            'triggerPx': str(trigger_price),
-            'ordPx': order_price,
-            'triggerPxType': trigger_px_type,
-            'posSide': pos_side,
+            "instId": inst,
+            "tdMode": "cross",
+            "side": side.lower(),
+            "ordType": "trigger",
+            "sz": str(size),
+            "triggerPx": str(trigger_price),
+            "orderPx": str(order_price),
+            "triggerPxType": trigger_px_type,
+            "posSide": pos_side,
         }
-        result = self._request('POST', '/api/v5/trade/order-algo', body=body)
+
+        result = self._request("POST", "/api/v5/trade/order-algo", body=body)
         if result.get('ok'):
             data = result.get('data', [{}])[0]
             return {'ok': True, 'algo_id': data.get('algoId'), 'data': data}
@@ -377,21 +414,32 @@ class Exchange:
 
     def place_trailing_order(self, symbol: str, side: str, size: float,
                              callback_ratio: float, trigger_price: float) -> Dict:
-        """Coloca un trailing stop nativo de OKX."""
+        """
+        Coloca un trailing stop en OKX V5 (move_order_stop).
+        """
+        inst = self._instrument_id(symbol)
+        pos_side = "long" if side.lower() == "sell" else "short"
+
         body = {
-            'instId': symbol,
-            'side': side,
-            'ordType': 'move_order_stop',
-            'size': str(size),
-            'callbackRatio': str(round(callback_ratio, 2)),
-            'triggerPx': str(round(trigger_price, 2)),
-            'ordPx': '-1',
+            "instId": inst,
+            "tdMode": "cross",
+            "side": side.lower(),
+            "ordType": "move_order_stop",
+            "sz": str(size),
+            "callbackRatio": str(round(callback_ratio, 2)),
+            "triggerPx": str(round(trigger_price, 2)),
+            "posSide": pos_side,
         }
-        result = self._request('POST', '/api/v5/trade/order-algo', body=body)
+
+        result = self._request("POST", "/api/v5/trade/order-algo", body=body)
         if result.get('ok'):
             data = result.get('data', [{}])[0]
             return {'ok': True, 'algo_id': data.get('algoId'), 'data': data}
         return {'ok': False, 'error': result.get('error')}
+
+    # ============================================================
+    # CANCELACIÓN Y CIERRE
+    # ============================================================
 
     def cancel_order(self, order_id: str) -> bool:
         """Cancela una orden activa."""
