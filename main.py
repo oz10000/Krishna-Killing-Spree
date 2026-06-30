@@ -2,20 +2,19 @@
 # ============================================================
 # KRISHNA KILLING SPREE — BUCLE PRINCIPAL (STATELESS)
 # ============================================================
-# Flujo: sync → cleanup → fetch → score → select → execute → log → exit
+# Flujo: init → cleanup → scoring → execute → log → exit
 # ============================================================
 
 import os
 import sys
 import time
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict
 
 import config
 from exchange import Exchange
 from strategy import Strategy
 from risk import RiskController
-from cleanup import CleanupEngine
 from metrics import MetricsCollector
 from utils import (
     log_info, log_warning, log_error, log_debug,
@@ -34,17 +33,16 @@ class KrishnaKillingSpree:
         self.exchange = None
         self.strategy = None
         self.risk = None
-        self.cleanup = None
         self.metrics = None
 
         self.capital = config.CAPITAL_INICIAL
+        self.last_equity = self.capital
         self.position = None
         self.instrument_info = {}
         self.trades_count = 0
         self.pnl_total = 0.0
-        self.last_equity = self.capital
+        self._last_mode = "NORMAL"
 
-        # Inicializar archivo de PnL
         init_pnl_file()
 
     # ============================================================
@@ -52,7 +50,7 @@ class KrishnaKillingSpree:
     # ============================================================
 
     def init(self) -> bool:
-        log_info("🔥 KRISHNA KILLING SPREE — INICIO DE EJECUCIÓN")
+        log_info("🔥 KRISHNA KILLING SPREE — INICIO")
         log_info(f"Timestamp: {datetime.now().isoformat()}")
 
         self.exchange = Exchange(self.api_key, self.secret_key, self.passphrase, self.demo)
@@ -61,7 +59,7 @@ class KrishnaKillingSpree:
             log_error("Fallo en la conexión con OKX.")
             return False
 
-        log_info("Conexión con OKX establecida.")
+        log_info("Conexión OKX establecida.")
 
         self.strategy = Strategy()
         self.metrics = MetricsCollector()
@@ -73,7 +71,6 @@ class KrishnaKillingSpree:
             log_info(f"Capital disponible: {self.capital:.2f} USDT")
 
         self.risk = RiskController(self.capital)
-        self.cleanup = CleanupEngine(self.exchange)
 
         for sym in config.SYMBOLS:
             info = self.exchange.get_instrument_info(sym)
@@ -84,37 +81,70 @@ class KrishnaKillingSpree:
             }
 
         log_info(f"Universo: {len(config.SYMBOLS)} activos")
-        log_info(f"Posiciones máximas: {config.MAX_POSITIONS}")
         log_info(f"Apalancamiento base: {config.BASE_LEVERAGE}x")
 
-        # Dashboard inicial
         update_dashboard("INICIANDO", equity=self.capital, modo="NORMAL")
-
         return True
 
     # ============================================================
-    # FASE 1: CLEANUP
+    # CLEANUP
     # ============================================================
 
     def phase_cleanup(self) -> Dict:
-        log_info("[FASE 1] CLEANUP — Reconciliación de estado")
-        result = self.cleanup.sync_and_cleanup()
+        log_debug("[CLEANUP] Reconciliación de estado")
 
-        # Si se encontraron posiciones, registrar
-        if result['positions_found'] > 0:
-            log_info(f"Posición encontrada en OKX: {result['positions_found']} activas")
+        # Obtener posiciones
+        positions = self.exchange.get_positions()
+        pos_data = positions.get('data', []) if positions.get('ok') else []
 
-        if result['inconsistencies_fixed'] > 0:
-            log_warning(f"Inconsistencias corregidas: {result['inconsistencies_fixed']}")
+        if pos_data:
+            log_info(f"Posición encontrada en OKX: {len(pos_data)} activa(s)")
 
-        return result
+        # Órdenes pendientes
+        pending = self.exchange.get_pending_orders()
+        pending_data = pending.get('data', []) if pending.get('ok') else []
+
+        # Órdenes algorítmicas
+        algo = self.exchange.get_pending_algo_orders()
+        algo_data = algo.get('data', []) if algo.get('ok') else []
+
+        # Cancelar órdenes huérfanas (sin posición)
+        pos_symbols = {p.get('instId') for p in pos_data if float(p.get('pos', 0)) > 0}
+        cancelled = 0
+
+        for order in pending_data:
+            if order.get('instId') not in pos_symbols:
+                self.exchange.cancel_order(order.get('ordId'))
+                cancelled += 1
+                log_debug(f"Orden huérfana cancelada: {order.get('ordId')}")
+
+        for order in algo_data:
+            if order.get('instId') not in pos_symbols:
+                self.exchange.cancel_algo_order(order.get('algoId'))
+                cancelled += 1
+                log_debug(f"Orden algorítmica huérfana cancelada: {order.get('algoId')}")
+
+        if cancelled:
+            log_info(f"Órdenes huérfanas canceladas: {cancelled}")
+
+        # Asegurar solo 1 posición
+        if len(pos_data) > config.MAX_POSITIONS:
+            log_warning(f"Más de {config.MAX_POSITIONS} posición. Cerrando excedentes.")
+            for pos in pos_data[config.MAX_POSITIONS:]:
+                self.exchange.close_position_market(
+                    pos.get('instId'),
+                    pos.get('posSide', 'long'),
+                    abs(float(pos.get('pos', 0)))
+                )
+
+        return {'positions_found': len(pos_data), 'orders_cancelled': cancelled}
 
     # ============================================================
-    # FASE 2: SCORING
+    # SCORING
     # ============================================================
 
     def phase_scoring(self) -> Dict:
-        log_debug("[FASE 2] SCORING — Análisis de mercado")
+        log_debug("[SCORING] Análisis de mercado")
         start = time.time()
 
         features_dict = {}
@@ -130,8 +160,6 @@ class KrishnaKillingSpree:
 
         result = self.strategy.select_top_asset(features_dict)
 
-        elapsed = (time.time() - start) * 1000
-
         if result:
             symbol, score, features = result
             log_debug(f"Mejor activo: {symbol} (score: {score:.3f})")
@@ -140,7 +168,6 @@ class KrishnaKillingSpree:
                 'score': score,
                 'features': features,
                 'features_dict': features_dict,
-                'latency_ms': elapsed,
                 'symbols_scanned': len(features_dict),
             }
         else:
@@ -150,17 +177,17 @@ class KrishnaKillingSpree:
                 'score': 0.0,
                 'features': None,
                 'features_dict': features_dict,
-                'latency_ms': elapsed,
                 'symbols_scanned': len(features_dict),
             }
 
     # ============================================================
-    # FASE 3: EJECUCIÓN
+    # EJECUCIÓN
     # ============================================================
 
     def phase_execute(self, scoring_result: Dict) -> Dict:
-        log_debug("[FASE 3] EJECUCIÓN — Control de riesgo")
+        log_debug("[EJECUCIÓN] Control de riesgo")
 
+        # Actualizar balance
         bal = self.exchange.get_balance()
         if bal and 'USDT' in bal:
             equity = float(bal['USDT'].get('available', self.capital))
@@ -169,24 +196,25 @@ class KrishnaKillingSpree:
         else:
             risk_metrics = self.risk.get_metrics()
 
-        # Detectar cambio de modo de riesgo
+        # Detectar cambio de modo
         current_mode = risk_metrics['mode']
-        if hasattr(self, '_last_mode') and self._last_mode != current_mode:
-            log_info(f"Cambio de modo de riesgo: {self._last_mode} → {current_mode}")
-        self._last_mode = current_mode
+        if self._last_mode != current_mode:
+            log_info(f"Cambio de modo: {self._last_mode} → {current_mode}")
+            self._last_mode = current_mode
 
-        # Verificar kill switch
+        # Kill switch
         if self.risk.is_kill_switch_activated():
-            log_error(f"⛔ KILL SWITCH ACTIVADO: {self.risk.get_kill_reason()}")
+            log_error(f"⛔ KILL SWITCH: {self.risk.get_kill_reason()}")
             update_dashboard("KILL", equity=self.capital, pnl_total=self.pnl_total,
                              trades=self.trades_count, modo="KILL")
             self._emergency_shutdown()
-            return {'trade_executed': False, 'kill_switch': True, 'reason': self.risk.get_kill_reason()}
+            return {'trade_executed': False, 'kill_switch': True}
 
+        # Parámetros efectivos
         params = self.risk.get_effective_parameters()
         if not params['trading_enabled']:
             log_debug("Trading deshabilitado por modo de riesgo")
-            return {'trade_executed': False, 'kill_switch': False, 'reason': 'trading_disabled'}
+            return {'trade_executed': False}
 
         symbol = scoring_result.get('symbol')
         score = scoring_result.get('score', 0)
@@ -194,36 +222,36 @@ class KrishnaKillingSpree:
 
         if not symbol or score < config.MIN_SCORE + params.get('min_score_boost', 0):
             log_debug(f"Score insuficiente: {score:.3f}")
-            return {'trade_executed': False, 'kill_switch': False, 'reason': 'score_too_low'}
+            return {'trade_executed': False}
 
         if self.strategy.is_on_cooldown(symbol):
             log_debug(f"{symbol} en cooldown")
-            return {'trade_executed': False, 'kill_switch': False, 'reason': 'cooldown'}
+            return {'trade_executed': False}
 
-        leverage = params['leverage']
-        size_factor = params['size_factor']
+        # Verificar que no haya posición activa
+        positions = self.exchange.get_positions()
+        if positions.get('ok') and positions.get('data'):
+            log_info(f"Posición activa detectada. No se abre nuevo trade.")
+            return {'trade_executed': False}
 
-        success = self._execute_trade(symbol, score, features, leverage, size_factor)
+        # Ejecutar trade
+        success = self._execute_trade(
+            symbol, score, features,
+            params['leverage'],
+            params['size_factor']
+        )
 
         if success:
             self.strategy.set_cooldown(symbol)
-            log_info(f"✅ Nueva posición abierta: {symbol} {features.get('trend_direction', 1)}")
+            log_info(f"✅ Nueva posición abierta: {symbol}")
             update_dashboard("RUNNING", symbol=symbol,
                              side='long' if features.get('trend_direction', 1) == 1 else 'short',
                              equity=self.capital, pnl_total=self.pnl_total,
                              trades=self.trades_count, modo=self.risk.mode)
-            # Actualizar PnL en la próxima iteración
+            return {'trade_executed': True, 'symbol': symbol, 'score': score}
         else:
-            log_warning(f"❌ Falló la ejecución del trade en {symbol}")
-
-        return {
-            'trade_executed': success,
-            'kill_switch': False,
-            'symbol': symbol,
-            'score': score,
-            'leverage': leverage,
-            'size_factor': size_factor,
-        }
+            log_warning(f"❌ Falló ejecución de trade en {symbol}")
+            return {'trade_executed': False}
 
     # ============================================================
     # EJECUCIÓN DE TRADE
@@ -298,16 +326,6 @@ class KrishnaKillingSpree:
                 activation = entry + (tp_price - entry) * 0.5 if side == 'long' else entry - (entry - tp_price) * 0.5
                 self.exchange.place_trailing_order(symbol, tp_side, size, callback_ratio, activation)
 
-            self.position = {
-                'symbol': symbol,
-                'side': side,
-                'entry': entry,
-                'size': size,
-                'tp_algo_id': tp_res.get('algo_id'),
-                'sl_algo_id': sl_res.get('algo_id'),
-                'open_time': time.time(),
-            }
-
             self.trades_count += 1
             self.metrics.log_trade({
                 'symbol': symbol,
@@ -328,14 +346,14 @@ class KrishnaKillingSpree:
             return False
 
     # ============================================================
-    # EMERGENCIA Y CIERRE
+    # EMERGENCIA
     # ============================================================
 
     def _emergency_shutdown(self):
-        log_info("⛔ Ejecutando cierre de emergencia...")
+        log_info("⛔ Cierre de emergencia...")
         self.exchange.close_all_positions()
         self.exchange.cancel_all_orders()
-        log_info("✅ Cierre de emergencia completado.")
+        log_info("✅ Cierre completado.")
 
     # ============================================================
     # RUN
@@ -348,16 +366,12 @@ class KrishnaKillingSpree:
             return {'success': False, 'error': 'init_failed'}
 
         # Cleanup
-        cleanup_result = self.phase_cleanup()
-        if cleanup_result['positions_found'] > 0:
-            # Si había posiciones, actualizar dashboard y registrar
-            update_dashboard("RUNNING", symbol="(posición activa)",
-                             equity=self.capital, pnl_total=self.pnl_total,
-                             trades=self.trades_count, modo=self.risk.mode)
+        self.phase_cleanup()
 
         if self.risk.is_kill_switch_activated():
             self.metrics.save_final_report()
-            return {'success': False, 'error': 'kill_switch', 'reason': self.risk.get_kill_reason()}
+            log_info("🔥 KRISHNA KILLING SPREE — FIN (KILL)")
+            return {'success': False, 'error': 'kill_switch'}
 
         # Scoring
         scoring_result = self.phase_scoring()
@@ -365,9 +379,8 @@ class KrishnaKillingSpree:
         # Ejecución
         execution_result = self.phase_execute(scoring_result)
 
-        # Actualizar PnL si hubo trade
+        # Actualizar PnL
         if execution_result.get('trade_executed'):
-            # Calcular PnL desde el balance actual
             bal = self.exchange.get_balance()
             if bal and 'USDT' in bal:
                 equity = float(bal['USDT'].get('available', self.capital))
@@ -375,7 +388,6 @@ class KrishnaKillingSpree:
                 self.pnl_total += pnl_ejecucion
                 self.last_equity = equity
 
-                # Registrar en CSV
                 append_pnl_row(
                     equity=equity,
                     pnl_total=self.pnl_total,
@@ -384,7 +396,7 @@ class KrishnaKillingSpree:
                     modo=self.risk.mode
                 )
 
-        # Guardar métricas del ciclo
+        # Métricas de ciclo
         cycle_data = {
             'symbols_scanned': scoring_result.get('symbols_scanned', 0),
             'best_symbol': scoring_result.get('symbol'),
@@ -394,25 +406,20 @@ class KrishnaKillingSpree:
             'latency_ms': (time.time() - start_time) * 1000,
             'mode': self.risk.mode,
             'dd_actual': self.risk.dd_actual,
-            'kill_switch': self.risk.is_kill_switch_activated(),
         }
         self.metrics.log_cycle(cycle_data)
 
-        elapsed = (time.time() - start_time)
+        elapsed = time.time() - start_time
         log_info(f"CICLO COMPLETADO en {elapsed:.2f}s")
 
-        # Dashboard final
         update_dashboard("FINALIZADO",
                          equity=self.capital,
                          pnl_total=self.pnl_total,
                          trades=self.trades_count,
                          modo=self.risk.mode)
 
-        # Guardar reporte final
         self.metrics.save_final_report()
-
-        # Registrar fin del bot
-        log_info("🔥 KRISHNA KILLING SPREE — FIN DE EJECUCIÓN")
+        log_info("🔥 KRISHNA KILLING SPREE — FIN")
 
         return {
             'success': True,
@@ -447,7 +454,7 @@ def main():
     try:
         bot = KrishnaKillingSpree(API_KEY, SECRET_KEY, PASSPHRASE, DEMO)
         result = bot.run()
-        log_info(f"Resultado final: {result}")
+        log_info(f"Resultado: {result}")
     except Exception as e:
         log_error(f"Error inesperado: {e}")
         import traceback
