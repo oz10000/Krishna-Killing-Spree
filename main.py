@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-KRISHNA KILLING SPREE — MAIN.PY (VERSIÓN CON MARGEN CORREGIDO)
+KRISHNA KILLING SPREE — MAIN.PY (CONTINUO)
+Versión con loop infinito para GitHub Actions (reinicio cada 5h).
 """
 
 import os
@@ -44,9 +45,11 @@ LOGS_DIR = "logs"
 SNAPSHOTS_DIR = "snapshots"
 
 # ============================================================
-# TRACE ENGINE
+# TRACE ENGINE (AUDITORÍA)
 # ============================================================
 class TradeTrace:
+    """Sistema de auditoría paso a paso para cada trade."""
+
     STEPS = [
         "SYMBOL_SELECTED",
         "MARKET_DATA_LOADED",
@@ -186,17 +189,17 @@ class KrishnaKillingSpree:
             for detail in data:
                 for asset in detail.get('details', []):
                     if asset.get('ccy') == 'USDT':
-                        self.capital = safe_float(asset.get('availBal'))
+                        self.capital = safe_float(asset.get('eq'))
                         self.last_equity = self.capital
-                        log_info(f"✅ Capital disponible: {self.capital:.2f} USDT")
+                        log_info(f"✅ Capital disponible (equity): {self.capital:.2f} USDT")
                         found = True
                         break
                 if found:
                     break
             if not found and 'USDT' in bal:
-                self.capital = safe_float(bal['USDT'].get('available'))
+                self.capital = safe_float(bal['USDT'].get('equity'))
                 self.last_equity = self.capital
-                log_info(f"✅ Capital disponible (alternativo): {self.capital:.2f} USDT")
+                log_info(f"✅ Capital disponible (equity alternativo): {self.capital:.2f} USDT")
                 found = True
             if not found:
                 log_warning("No se encontró USDT en la respuesta de balance.")
@@ -236,7 +239,7 @@ class KrishnaKillingSpree:
         return self.valid_instruments.get(symbol, False)
 
     # ============================================================
-    # PROCESAMIENTO DE SÍMBOLO (CON CÁLCULO DE MARGEN CORREGIDO)
+    # PROCESAMIENTO DE SÍMBOLO (RESILIENTE)
     # ============================================================
     def process_symbol(self, symbol: str) -> Dict:
         trace = TradeTrace()
@@ -332,7 +335,7 @@ class KrishnaKillingSpree:
 
                 trace.log_success("RISK_CHECK", {"mode": self.risk.mode, "leverage": params['leverage']})
 
-                # ORDER_BUILT — CON CÁLCULO DE MARGEN CORREGIDO
+                # ORDER_BUILT
                 try:
                     ticker = self.exchange._request("GET", "/api/v5/market/ticker", params={"instId": symbol})
                     if not ticker.get('ok') or not ticker.get('data'):
@@ -357,7 +360,6 @@ class KrishnaKillingSpree:
                     lot_sz = info.get('lot_size', 0.001)
                     min_sz = info.get('min_sz', 0.001)
 
-                    # 🔥 CORRECCIÓN AQUÍ: usar 85% del capital (antes 98%)
                     capital_factor = 0.85
                     available = self.capital * capital_factor
                     desired_notional = available * params['leverage'] * params['size_factor']
@@ -365,9 +367,9 @@ class KrishnaKillingSpree:
                     size = desired_notional / (entry * ct_val)
                     size = max(min_sz, round(size / lot_sz) * lot_sz)
 
-                    # Verificar margen estimado contra balance real
+                    # Verificar margen
                     estimated_margin = (entry * size * ct_val) / params['leverage']
-                    required_margin = estimated_margin * 1.1  # buffer 10%
+                    required_margin = estimated_margin * 1.1
 
                     if required_margin > self.capital:
                         trace.log_fail("ORDER_BUILT", f"Margen insuficiente: {required_margin:.2f} USDT > {self.capital:.2f} USDT")
@@ -616,7 +618,7 @@ class KrishnaKillingSpree:
         log_info("=" * 60)
         log_info("📊 RESUMEN DEL CICLO")
         log_info("=" * 60)
-        log_info(f"  Capital actual: {self.capital:.2f} USDT")
+        log_info(f"  Capital actual (equity): {self.capital:.2f} USDT")
         log_info(f"  Trades ejecutados: {self.trades_count}")
         log_info(f"  PnL total: {self.pnl_total:.2f} USDT")
         log_info(f"  Modo riesgo: {self.risk.mode}")
@@ -624,66 +626,111 @@ class KrishnaKillingSpree:
         log_info("=" * 60)
 
     # ============================================================
-    # RUN
+    # 🆕 ACTUALIZACIÓN PNL TRAS CIERRE
+    # ============================================================
+    def _update_pnl_after_close(self) -> None:
+        """Actualiza PnL cuando una posición se cierra."""
+        bal = self.exchange.get_balance()
+        if bal.get('ok'):
+            data = bal.get('data', [])
+            for detail in data:
+                for asset in detail.get('details', []):
+                    if asset.get('ccy') == 'USDT':
+                        equity = safe_float(asset.get('eq'))
+                        pnl_ejecucion = equity - self.last_equity
+                        if abs(pnl_ejecucion) > 0.01:
+                            self.pnl_total += pnl_ejecucion
+                            self.last_equity = equity
+                            self.capital = equity
+                            self._append_pnl_row(equity, self.pnl_total, pnl_ejecucion, self.trades_count, self.risk.mode)
+                            log_info(f"📈 PnL del trade: {pnl_ejecucion:.2f} USDT | PnL total: {self.pnl_total:.2f} USDT")
+                        break
+
+    # ============================================================
+    # 🆕 BUCLE INFINITO (PARA GITHUB ACTIONS)
     # ============================================================
     def run(self) -> Dict:
-        start_time = time.time()
+        """Bucle principal INFINITO — para GitHub Actions (reinicio cada 5h)."""
+        log_info("🔥 KRISHNA KILLING SPREE — INICIO (MODO CONTINUO)")
 
         if not self.init():
+            log_error("Fallo en la inicialización. Saliendo.")
             return {'success': False, 'error': 'init_failed'}
 
         self._cleanup()
 
         if self.risk.is_kill_switch_activated():
-            self._save_metrics()
-            log_info("🔥 KRISHNA KILLING SPREE — FIN (KILL)")
+            log_error("Kill switch activado al inicio. Saliendo.")
             return {'success': False, 'error': 'kill_switch'}
 
-        log_info("🔄 Procesando símbolos...")
+        log_info("🔄 Bucle principal iniciado. Esperando oportunidades...")
 
-        results = []
-        for symbol in SYMBOLS:
-            log_debug(f"--- Procesando {symbol} ---")
-            result = self.process_symbol(symbol)
-            results.append(result)
+        position_open = False
+        last_position_check = 0
+        trade_count = 0
 
-            if result.get('executed'):
-                bal = self.exchange.get_balance()
-                if bal.get('ok'):
-                    data = bal.get('data', [])
-                    for detail in data:
-                        for asset in detail.get('details', []):
-                            if asset.get('ccy') == 'USDT':
-                                equity = safe_float(asset.get('availBal'))
-                                pnl_ejecucion = equity - self.last_equity
-                                self.pnl_total += pnl_ejecucion
-                                self.last_equity = equity
-                                self._append_pnl_row(equity, self.pnl_total, pnl_ejecucion, self.trades_count, self.risk.mode)
-                                break
+        while True:
+            try:
+                # 1. Verificar posiciones activas en OKX
+                positions = self.exchange.get_positions()
+                pos_data = positions.get('data', []) if positions.get('ok') else []
+                active_positions = [p for p in pos_data if safe_float(p.get('pos', 0)) > 0]
 
-            if result.get('executed'):
-                log_info("✅ Trade ejecutado, deteniendo escaneo.")
+                if active_positions:
+                    if not position_open:
+                        log_info(f"📊 Posición activa: {active_positions[0].get('instId')}")
+                        position_open = True
+
+                    # Mostrar PnL cada 30 segundos
+                    now = time.time()
+                    if now - last_position_check > 30:
+                        for p in active_positions:
+                            pnl = safe_float(p.get('upl'))
+                            log_info(f"💹 PnL: {pnl:.2f} USDT")
+                        last_position_check = now
+
+                    time.sleep(5)  # Esperar antes de volver a verificar
+                    continue
+
+                # 2. No hay posición → buscar señal
+                if position_open:
+                    log_info("✅ Posición cerrada. Buscando nueva oportunidad...")
+                    position_open = False
+                    self._update_pnl_after_close()
+
+                time.sleep(2)
+
+                # 3. Escanear símbolos y ejecutar máximo 1 trade
+                trade_executed = False
+                for symbol in SYMBOLS:
+                    log_debug(f"--- Procesando {symbol} ---")
+                    try:
+                        result = self.process_symbol(symbol)
+                        if result.get('executed'):
+                            trade_count += 1
+                            trade_executed = True
+                            position_open = True
+                            log_info(f"🚀 Trade #{trade_count} ejecutado en {symbol}")
+                            break  # Solo 1 trade por ciclo
+                    except Exception as e:
+                        log_error(f"Error procesando {symbol}: {e}")
+                        continue  # Siguiente símbolo
+
+                if not trade_executed:
+                    log_debug("No se encontraron señales válidas. Esperando...")
+                    time.sleep(30)  # Esperar 30s antes de re-escanear
+
+            except KeyboardInterrupt:
+                log_info("⏹️ Interrupción manual. Cerrando...")
                 break
+            except Exception as e:
+                log_error(f"Error en bucle principal: {e}")
+                traceback.print_exc()
+                time.sleep(10)  # Esperar y reintentar
 
-        if not any(r.get('executed') for r in results):
-            self._diagnose_no_trades()
-
-        elapsed = time.time() - start_time
-        log_info(f"CICLO COMPLETADO en {elapsed:.2f}s")
-
-        self._print_summary()
         self._save_metrics()
-        log_info("🔥 KRISHNA KILLING SPREE — FIN")
-
-        return {
-            'success': True,
-            'mode': self.risk.mode,
-            'dd': self.risk.dd_actual,
-            'trade_executed': any(r.get('executed') for r in results),
-            'symbol': next((r.get('symbol') for r in results if r.get('executed')), None),
-            'elapsed_seconds': elapsed,
-            'stats': self.stats
-        }
+        log_info("🔥 KRISHNA KILLING SPREE — FIN (LOOP DETENIDO)")
+        return {'success': True, 'mode': self.risk.mode, 'trade_executed': False}
 
 # ============================================================
 # ENTRY POINT
