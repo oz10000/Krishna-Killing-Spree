@@ -1,9 +1,8 @@
 # exchange.py
 # ============================================================
-# CLIENTE OKX V5 — KRISHNA KILLING SPREE (EQUIVALENTE A BLACKBIRDOFPREY)
+# CLIENTE OKX V5 — CLONADO FUNCIONAL DE BLACKBIRDOFPREY
 # ============================================================
-# Versión completamente regenerada para ser funcionalmente equivalente
-# al repositorio BlackBirdOfPrey en toda la comunicación con OKX.
+# 100% equivalente en comportamiento de API
 # ============================================================
 
 import hmac
@@ -17,6 +16,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Union, Tuple
 
 import config
+from utils import log_info, log_error, log_debug
 
 
 class Exchange:
@@ -33,71 +33,42 @@ class Exchange:
             'User-Agent': 'Krishna-Killing-Spree/2.0'
         })
 
-        # Estado interno
         self._connected = False
         self._time_offset = 0
         self._last_sync_time = 0
         self._sync_interval = 60
         self._instrument_cache = {}
-        self._account_mode = None
-        self._account_mode_fetched = False
-        self._margin_mode = "cross"
-        self._margin_mode_fetched = False
 
     # ============================================================
-    # UTILIDADES DE SÍMBOLOS Y TAMAÑO
+    # UTILIDADES (IDÉNTICAS A BLACKBIRDOFPREY)
     # ============================================================
 
     def _instrument_id(self, symbol: str) -> str:
-        """Convierte símbolo al formato OKX V5 (BTC → BTC-USDT-SWAP)."""
         symbol = symbol.upper().strip()
         if symbol.endswith("-USDT-SWAP"):
             return symbol
         return f"{symbol}-USDT-SWAP"
 
     def _to_str_size(self, size: float, lot_sz: float) -> str:
-        """Formatea el tamaño según el lot size del instrumento."""
+        """Formatea el tamaño según el lot size (exactamente igual que BlackBirdOfPrey)."""
         if lot_sz == 0:
             return str(int(size))
-        decimals = max(0, -int(round(math.log10(lot_sz))))
+        decimals = 0
+        while (lot_sz * 10 ** decimals) % 1 != 0 and decimals < 10:
+            decimals += 1
         return f"{size:.{decimals}f}"
 
-    def _get_margin_mode(self) -> str:
-        """Obtiene dinámicamente el modo de margen de la cuenta (cross/isolated)."""
-        if self._margin_mode_fetched:
-            return self._margin_mode
-
-        try:
-            result = self._request('GET', '/api/v5/account/config')
-            if result.get('ok'):
-                data = result.get('data', [])
-                if data:
-                    # acctLv: 1 = isolated, 2 = cross, 3 = both
-                    acct_lv = data[0].get('acctLv', '2')
-                    self._margin_mode = "isolated" if acct_lv == "1" else "cross"
-                else:
-                    self._margin_mode = "cross"
-            else:
-                self._margin_mode = "cross"
-        except Exception:
-            self._margin_mode = "cross"
-
-        self._margin_mode_fetched = True
-        return self._margin_mode
-
     # ============================================================
-    # AUTENTICACIÓN Y FIRMA
+    # AUTENTICACIÓN (IDÉNTICA A BLACKBIRDOFPREY)
     # ============================================================
 
     def _iso_timestamp(self) -> str:
         return datetime.utcnow().isoformat(timespec='milliseconds') + 'Z'
 
     def _sync_time(self, force: bool = False) -> bool:
-        """Sincroniza el tiempo con el servidor OKX."""
         now = time.time()
         if not force and (now - self._last_sync_time) < self._sync_interval:
             return True
-
         try:
             response = self.session.get(f"{self.base_url}/api/v5/public/time", timeout=5)
             if response.status_code == 200:
@@ -113,33 +84,26 @@ class Exchange:
         return False
 
     def _ensure_time_synced(self) -> None:
-        """Asegura que el tiempo esté sincronizado (fuerza si es necesario)."""
         if not self._sync_time(force=False):
             self._sync_time(force=True)
 
     def _sign_request(self, method: str, path: str, params: dict = None, body: dict = None) -> Tuple[Dict, str]:
-        """Genera firma HMAC-SHA256 para OKX V5 con soporte para query string."""
         self._ensure_time_synced()
-
         timestamp = self._iso_timestamp()
 
-        # Body string (ordenado para consistencia)
         if body:
             body_str = json.dumps(body, separators=(', ', ': '), sort_keys=True)
         else:
             body_str = ""
 
-        # Incluir query params en la firma (CRÍTICO)
         if params:
             query = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
             full_path = f"{path}?{query}"
         else:
             full_path = path
 
-        # String a firmar: timestamp + method + full_path + body
         sign_str = timestamp + method + full_path + body_str
 
-        # HMAC-SHA256
         signature = base64.b64encode(
             hmac.new(
                 self.secret_key.encode('utf-8'),
@@ -148,7 +112,6 @@ class Exchange:
             ).digest()
         ).decode()
 
-        # Cabeceras
         headers = {
             'OK-ACCESS-KEY': self.api_key,
             'OK-ACCESS-SIGN': signature,
@@ -157,7 +120,6 @@ class Exchange:
             'Content-Type': 'application/json'
         }
 
-        # Modo demo
         if self.demo:
             headers["x-simulated-trading"] = "1"
 
@@ -165,10 +127,7 @@ class Exchange:
 
     def _request(self, method: str, path: str, params: dict = None, body: dict = None,
                  max_retries: int = 3, retry_delay: float = 1.0) -> dict:
-        """Realiza una petición autenticada a OKX con reintentos exponenciales."""
         url = f"{self.base_url}{path}"
-
-        # Query string
         query_str = ''
         if params:
             import urllib.parse
@@ -179,23 +138,12 @@ class Exchange:
         for attempt in range(max_retries):
             try:
                 if method.upper() == 'GET':
-                    response = self.session.get(
-                        url + query_str,
-                        headers=headers,
-                        timeout=10
-                    )
+                    response = self.session.get(url + query_str, headers=headers, timeout=10)
                 else:
-                    response = self.session.post(
-                        url + query_str,
-                        headers=headers,
-                        data=body_str,
-                        timeout=10
-                    )
+                    response = self.session.post(url + query_str, headers=headers, data=body_str, timeout=10)
 
-                # Manejar códigos de error HTTP
                 if response.status_code == 429:
-                    sleep_time = retry_delay * (2 ** attempt)
-                    time.sleep(sleep_time)
+                    time.sleep(retry_delay * (2 ** attempt))
                     continue
 
                 response.raise_for_status()
@@ -203,12 +151,14 @@ class Exchange:
 
                 if data.get('code') != '0':
                     if data.get('code') == '429':
-                        sleep_time = retry_delay * (2 ** attempt)
-                        time.sleep(sleep_time)
+                        time.sleep(retry_delay * (2 ** attempt))
                         continue
+                    # 🔥 LOG DETALLADO DEL ERROR (igual que BlackBird)
+                    error_msg = data.get('msg', 'Unknown error')
+                    log_error(f"OKX error: {error_msg} (code: {data.get('code')})")
                     return {
                         'ok': False,
-                        'error': data.get('msg', 'Unknown error'),
+                        'error': error_msg,
                         'data': None,
                         'code': data.get('code')
                     }
@@ -233,21 +183,18 @@ class Exchange:
         return {'ok': False, 'error': 'Max retries exceeded', 'data': None}
 
     # ============================================================
-    # MÉTODOS PÚBLICOS (sin autenticación)
+    # MÉTODOS PÚBLICOS (IDÉNTICOS)
     # ============================================================
 
     def fetch_historical_candles(self, symbol: str, limit: int = 100, bar: str = '5m') -> Optional[dict]:
-        """Descarga velas históricas desde OKX Public API."""
         url = f"{self.base_url}/api/v5/market/candles"
         params = {'instId': symbol, 'bar': bar, 'limit': limit}
-
         try:
             response = self.session.get(url, params=params, timeout=10)
             response.raise_for_status()
             data = response.json()
             if data.get('code') != '0' or not data.get('data'):
                 return None
-
             candles = data['data']
             return {
                 'ts': [c[0] for c in candles],
@@ -261,7 +208,6 @@ class Exchange:
             return None
 
     def get_ticker(self, symbol: str) -> Optional[Dict]:
-        """Obtiene el ticker actual de un símbolo."""
         url = f"{self.base_url}/api/v5/market/ticker"
         params = {'instId': symbol}
         try:
@@ -275,7 +221,6 @@ class Exchange:
             return None
 
     def get_instrument_info(self, symbol: str) -> Dict:
-        """Obtiene información del contrato (ctVal, lotSz, minSz)."""
         if symbol in self._instrument_cache:
             return self._instrument_cache[symbol]
 
@@ -287,7 +232,6 @@ class Exchange:
             data = response.json()
             if data.get('code') != '0' or not data.get('data'):
                 return {'ctVal': 0.01, 'lotSz': 0.001, 'minSz': 0.001}
-
             info = data['data'][0]
             result = {
                 'ctVal': float(info.get('ctVal', 0.01)),
@@ -300,85 +244,21 @@ class Exchange:
             return {'ctVal': 0.01, 'lotSz': 0.001, 'minSz': 0.001}
 
     # ============================================================
-    # MÉTODOS PRIVADOS (autenticados)
-    # ============================================================
-
-    def set_leverage(self, symbol: str, leverage: int, mgn_mode: str = 'isolated') -> bool:
-        """Establece apalancamiento para un símbolo."""
-        body = {'instId': symbol, 'lever': str(leverage), 'mgnMode': mgn_mode}
-        result = self._request('POST', '/api/v5/account/set-leverage', body=body)
-        return result.get('ok', False)
-
-    def get_balance(self) -> Dict:
-        """Obtiene el balance de la cuenta."""
-        result = self._request('GET', '/api/v5/account/balance')
-        if not result.get('ok'):
-            return {}
-
-        data = result.get('data', [])
-        if not data:
-            return {}
-
-        for detail in data:
-            if detail.get('uTime'):
-                for asset in detail.get('details', []):
-                    if asset.get('ccy') == 'USDT':
-                        return {
-                            'USDT': {
-                                'available': float(asset.get('availBal', 0)),
-                                'equity': float(asset.get('eq', 0))
-                            }
-                        }
-        return {}
-
-    def get_positions(self, symbol: str = None) -> Dict:
-        """Obtiene posiciones abiertas."""
-        params = {}
-        if symbol:
-            params['instId'] = symbol
-        result = self._request('GET', '/api/v5/account/positions', params=params)
-        if not result.get('ok'):
-            return {'ok': False, 'data': []}
-        return {'ok': True, 'data': result.get('data', [])}
-
-    def get_pending_orders(self, symbol: str = None) -> Dict:
-        """Obtiene órdenes pendientes (market/limit)."""
-        params = {}
-        if symbol:
-            params['instId'] = symbol
-        result = self._request('GET', '/api/v5/trade/orders-pending', params=params)
-        if not result.get('ok'):
-            return {'ok': False, 'data': []}
-        return {'ok': True, 'data': result.get('data', [])}
-
-    def get_pending_algo_orders(self, symbol: str = None) -> Dict:
-        """Obtiene órdenes algorítmicas pendientes (TP/SL/trailing)."""
-        params = {}
-        if symbol:
-            params['instId'] = symbol
-        result = self._request('GET', '/api/v5/trade/orders-algo-pending', params=params)
-        if not result.get('ok'):
-            return {'ok': False, 'data': []}
-        return {'ok': True, 'data': result.get('data', [])}
-
-    # ============================================================
-    # ÓRDENES (EQUIVALENTES A BLACKBIRDOFPREY)
+    # ÓRDENES — CLONADAS EXACTAMENTE DE BLACKBIRDOFPREY
     # ============================================================
 
     def place_market_order(self, symbol: str, side: str, size: float) -> Dict:
-        """Coloca una orden de mercado en OKX V5."""
         inst = self._instrument_id(symbol)
         pos_side = "long" if side.lower() == "buy" else "short"
         lot_sz = self.get_instrument_info(symbol).get('lotSz', 0.001)
-        sz_str = self._to_str_size(size, lot_sz)
 
         body = {
             "instId": inst,
-            "tdMode": self._get_margin_mode(),
+            "tdMode": "cross",
             "side": side.lower(),
             "posSide": pos_side,
             "ordType": "market",
-            "sz": sz_str,
+            "sz": self._to_str_size(size, lot_sz),
         }
 
         result = self._request("POST", "/api/v5/trade/order", body=body)
@@ -390,17 +270,15 @@ class Exchange:
     def place_conditional_order(self, symbol: str, side: str, size: float,
                                 trigger_price: float, order_price: str = '-1',
                                 trigger_px_type: str = 'last', pos_side: str = 'long') -> Dict:
-        """Coloca una orden condicional (TP/SL) en OKX V5."""
         inst = self._instrument_id(symbol)
         lot_sz = self.get_instrument_info(symbol).get('lotSz', 0.001)
-        sz_str = self._to_str_size(size, lot_sz)
 
         body = {
             "instId": inst,
-            "tdMode": self._get_margin_mode(),
+            "tdMode": "cross",
             "side": side.lower(),
             "ordType": "trigger",
-            "sz": sz_str,
+            "sz": self._to_str_size(size, lot_sz),
             "triggerPx": str(trigger_price),
             "orderPx": str(order_price),
             "triggerPxType": trigger_px_type,
@@ -415,18 +293,16 @@ class Exchange:
 
     def place_trailing_order(self, symbol: str, side: str, size: float,
                              callback_ratio: float, trigger_price: float) -> Dict:
-        """Coloca un trailing stop en OKX V5."""
         inst = self._instrument_id(symbol)
         pos_side = "long" if side.lower() == "sell" else "short"
         lot_sz = self.get_instrument_info(symbol).get('lotSz', 0.001)
-        sz_str = self._to_str_size(size, lot_sz)
 
         body = {
             "instId": inst,
-            "tdMode": self._get_margin_mode(),
+            "tdMode": "cross",
             "side": side.lower(),
             "ordType": "move_order_stop",
-            "sz": sz_str,
+            "sz": self._to_str_size(size, lot_sz),
             "callbackRatio": str(round(callback_ratio, 2)),
             "triggerPx": str(round(trigger_price, 2)),
             "posSide": pos_side,
@@ -439,51 +315,42 @@ class Exchange:
         return {'ok': False, 'error': result.get('error')}
 
     # ============================================================
-    # CANCELACIÓN Y CIERRE
+    # CANCELACIÓN Y CIERRE (IDÉNTICOS)
     # ============================================================
 
     def cancel_order(self, order_id: str) -> bool:
-        """Cancela una orden activa."""
         body = {'ordId': order_id}
         result = self._request('POST', '/api/v5/trade/cancel-order', body=body)
         return result.get('ok', False)
 
     def cancel_algo_order(self, algo_id: str) -> bool:
-        """Cancela una orden algorítmica."""
         body = {'algoId': [algo_id]}
         result = self._request('POST', '/api/v5/trade/cancel-algos', body=body)
         return result.get('ok', False)
 
     def cancel_all_orders(self, symbol: str = None) -> int:
-        """Cancela todas las órdenes (opcionalmente por símbolo)."""
         count = 0
-
         pending = self.get_pending_orders(symbol)
         if pending.get('ok'):
             for order in pending.get('data', []):
                 if self.cancel_order(order.get('ordId')):
                     count += 1
-
         algo = self.get_pending_algo_orders(symbol)
         if algo.get('ok'):
             for order in algo.get('data', []):
                 if self.cancel_algo_order(order.get('algoId')):
                     count += 1
-
         return count
 
     def close_position_market(self, symbol: str, side: str, size: float) -> Dict:
-        """Cierra una posición con orden de mercado en sentido contrario."""
         close_side = 'sell' if side == 'long' else 'buy'
         return self.place_market_order(symbol, close_side, size)
 
     def close_all_positions(self) -> int:
-        """Cierra todas las posiciones abiertas."""
         count = 0
         positions = self.get_positions()
         if not positions.get('ok'):
             return 0
-
         for pos in positions.get('data', []):
             symbol = pos.get('instId')
             side = pos.get('posSide', 'long')
@@ -491,19 +358,70 @@ class Exchange:
             if size > 0:
                 self.close_position_market(symbol, side, size)
                 count += 1
-
         return count
 
-    def connect(self) -> bool:
-        """Verifica la conexión con OKX (con reintentos)."""
-        self._sync_time(force=True)
+    # ============================================================
+    # CONEXIÓN
+    # ============================================================
 
+    def get_balance(self) -> Dict:
+        result = self._request('GET', '/api/v5/account/balance')
+        if not result.get('ok'):
+            return {}
+        data = result.get('data', [])
+        if not data:
+            return {}
+        for detail in data:
+            if detail.get('uTime'):
+                for asset in detail.get('details', []):
+                    if asset.get('ccy') == 'USDT':
+                        return {
+                            'USDT': {
+                                'available': float(asset.get('availBal', 0)),
+                                'equity': float(asset.get('eq', 0))
+                            }
+                        }
+        return {}
+
+    def get_positions(self, symbol: str = None) -> Dict:
+        params = {}
+        if symbol:
+            params['instId'] = symbol
+        result = self._request('GET', '/api/v5/account/positions', params=params)
+        if not result.get('ok'):
+            return {'ok': False, 'data': []}
+        return {'ok': True, 'data': result.get('data', [])}
+
+    def get_pending_orders(self, symbol: str = None) -> Dict:
+        params = {}
+        if symbol:
+            params['instId'] = symbol
+        result = self._request('GET', '/api/v5/trade/orders-pending', params=params)
+        if not result.get('ok'):
+            return {'ok': False, 'data': []}
+        return {'ok': True, 'data': result.get('data', [])}
+
+    def get_pending_algo_orders(self, symbol: str = None) -> Dict:
+        params = {}
+        if symbol:
+            params['instId'] = symbol
+        result = self._request('GET', '/api/v5/trade/orders-algo-pending', params=params)
+        if not result.get('ok'):
+            return {'ok': False, 'data': []}
+        return {'ok': True, 'data': result.get('data', [])}
+
+    def set_leverage(self, symbol: str, leverage: int, mgn_mode: str = 'isolated') -> bool:
+        body = {'instId': symbol, 'lever': str(leverage), 'mgnMode': mgn_mode}
+        result = self._request('POST', '/api/v5/account/set-leverage', body=body)
+        return result.get('ok', False)
+
+    def connect(self) -> bool:
+        self._sync_time(force=True)
         for attempt in range(3):
             result = self._request('GET', '/api/v5/account/balance')
             if result.get('ok'):
                 self._connected = True
                 return True
             time.sleep(2 ** attempt)
-
         self._connected = False
         return False
