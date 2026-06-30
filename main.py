@@ -1,6 +1,6 @@
 # main.py
 # ============================================================
-# BLACKBIRD BOT V2 — GITHUB ACTIONS (STATELESS)
+# KRISHNA KILLING SPREE — BUCLE PRINCIPAL (STATELESS)
 # ============================================================
 # Flujo: sync → cleanup → fetch → score → select → execute → log → exit
 # ============================================================
@@ -8,8 +8,8 @@
 import os
 import sys
 import time
-import json
 from datetime import datetime
+from typing import Dict, List, Optional, Tuple, Any  # ✅ CORREGIDO: añadido typing
 
 import config
 from exchange import Exchange
@@ -20,7 +20,7 @@ from metrics import MetricsCollector
 from utils import log_info, log_warning, log_error, log_debug, acquire_lock, release_lock
 
 
-class BlackBirdBotV2:
+class KrishnaKillingSpree:  # ✅ CORREGIDO: nombre cambiado a KrishnaKillingSpree
     def __init__(self, api_key: str, secret_key: str, passphrase: str, demo: bool = True):
         self.api_key = api_key
         self.secret_key = secret_key
@@ -43,7 +43,7 @@ class BlackBirdBotV2:
 
     def init(self) -> bool:
         log_info("=" * 60)
-        log_info("BLACKBIRD BOT V2 — INICIO DE EJECUCIÓN")
+        log_info("🔥 KRISHNA KILLING SPREE — INICIO DE EJECUCIÓN")
         log_info(f"Timestamp: {datetime.now().isoformat()}")
         log_info("=" * 60)
 
@@ -58,7 +58,6 @@ class BlackBirdBotV2:
         self.strategy = Strategy()
         self.metrics = MetricsCollector()
 
-        # Obtener balance inicial
         bal = self.exchange.get_balance()
         if bal and 'USDT' in bal:
             self.capital = float(bal['USDT'].get('available', config.CAPITAL_INICIAL))
@@ -67,7 +66,6 @@ class BlackBirdBotV2:
         self.risk = RiskController(self.capital)
         self.cleanup = CleanupEngine(self.exchange)
 
-        # Información de instrumentos
         for sym in config.SYMBOLS:
             info = self.exchange.get_instrument_info(sym)
             self.instrument_info[sym] = {
@@ -88,25 +86,20 @@ class BlackBirdBotV2:
     # ============================================================
 
     def phase_cleanup(self) -> Dict:
-        """Limpia posiciones y órdenes huérfanas."""
         log_info("[FASE 1] CLEANUP — Reconciliación de estado")
         start = time.time()
-
         result = self.cleanup.sync_and_cleanup()
-
         elapsed = (time.time() - start) * 1000
         log_info(f"Cleanup completado en {elapsed:.0f}ms")
         log_info(f"  Posiciones encontradas: {result['positions_found']}")
         log_info(f"  Inconsistencias corregidas: {result['inconsistencies_fixed']}")
-
         return result
 
     # ============================================================
-    # FASE 2: FETCH + SCORING
+    # FASE 2: SCORING (ANÁLISIS DE MERCADO)
     # ============================================================
 
     def phase_scoring(self) -> Dict:
-        """Descarga datos y calcula scores."""
         log_info("[FASE 2] SCORING — Análisis de mercado")
         start = time.time()
 
@@ -121,7 +114,6 @@ class BlackBirdBotV2:
             except Exception as e:
                 log_debug(f"Error fetching {sym}: {e}")
 
-        # Seleccionar top asset
         result = self.strategy.select_top_asset(features_dict)
 
         elapsed = (time.time() - start) * 1000
@@ -143,14 +135,12 @@ class BlackBirdBotV2:
         }
 
     # ============================================================
-    # FASE 3: RIESGO Y EJECUCIÓN
+    # FASE 3: EJECUCIÓN (CONTROL DE RIESGO Y TRADING)
     # ============================================================
 
     def phase_execute(self, scoring_result: Dict) -> Dict:
-        """Aplica control de riesgo y ejecuta trade si procede."""
         log_info("[FASE 3] EJECUCIÓN — Control de riesgo y trading")
 
-        # Actualizar riesgo con capital actual
         bal = self.exchange.get_balance()
         if bal and 'USDT' in bal:
             equity = float(bal['USDT'].get('available', self.capital))
@@ -162,19 +152,16 @@ class BlackBirdBotV2:
         log_info(f"  Drawdown: {risk_metrics['dd_actual']:.2f}% | Modo: {risk_metrics['mode']}")
         log_info(f"  Leverage efectivo: {risk_metrics['leverage_effective']}× | Size factor: {risk_metrics['size_factor']*100:.0f}%")
 
-        # Verificar kill switch
         if self.risk.is_kill_switch_activated():
-            log_error(f"⛔ KILL SWITCH ACTIVADO: {self.risk.get_kill_reason()}")
+            log_error(f"⛔ KILL SWITCH: {self.risk.get_kill_reason()}")
             self._emergency_shutdown()
             return {'trade_executed': False, 'kill_switch': True, 'reason': self.risk.get_kill_reason()}
 
-        # Obtener parámetros efectivos
         params = self.risk.get_effective_parameters()
         if not params['trading_enabled']:
             log_info("  Trading deshabilitado por modo de riesgo")
             return {'trade_executed': False, 'kill_switch': False, 'reason': 'trading_disabled'}
 
-        # Verificar si hay señal
         symbol = scoring_result.get('symbol')
         score = scoring_result.get('score', 0)
         features = scoring_result.get('features')
@@ -183,21 +170,18 @@ class BlackBirdBotV2:
             log_info(f"  Score insuficiente: {score:.3f} < {config.MIN_SCORE + params.get('min_score_boost', 0):.3f}")
             return {'trade_executed': False, 'kill_switch': False, 'reason': 'score_too_low'}
 
-        # Verificar cooldown
         if self.strategy.is_on_cooldown(symbol):
             log_info(f"  {symbol} en cooldown")
             return {'trade_executed': False, 'kill_switch': False, 'reason': 'cooldown'}
 
-        # Ejecutar trade
         leverage = params['leverage']
         size_factor = params['size_factor']
 
         success = self._execute_trade(symbol, score, features, leverage, size_factor)
 
         if success:
-            # Activar cooldown
             self.strategy.set_cooldown(symbol)
-            log_info(f"  ✅ Trade ejecutado en {symbol} (cooldown activado)")
+            log_info(f"  ✅ Trade ejecutado en {symbol}")
         else:
             log_warning(f"  ❌ Falló la ejecución del trade en {symbol}")
 
@@ -216,7 +200,6 @@ class BlackBirdBotV2:
 
     def _execute_trade(self, symbol: str, score: float, features: Dict,
                        leverage: int, size_factor: float) -> bool:
-        """Ejecuta una orden de mercado con TP/SL y trailing."""
         try:
             ticker = self.exchange.get_ticker(symbol)
             if not ticker:
@@ -231,7 +214,6 @@ class BlackBirdBotV2:
             direction = features.get('trend_direction', 1)
             side = 'long' if direction == 1 else 'short'
 
-            # Calcular tamaño
             info = self.instrument_info.get(symbol, {'ct_val': 0.01, 'lot_sz': 0.001, 'min_sz': 0.001})
             ct_val = info['ct_val']
             lot_sz = info['lot_sz']
@@ -246,7 +228,7 @@ class BlackBirdBotV2:
                 log_error(f"Tamaño inválido para {symbol}: {size}")
                 return False
 
-            log_info(f"📈 TRADE: {symbol} | {side.upper()} | Entry: {entry:.2f} | Size: {size:.4f} | Score: {score:.3f}")
+            log_info(f"📈 TRADE: {symbol} | {side.upper()} | Entry: {entry:.2f} | Size: {size:.4f}")
 
             # 1. Market order
             order_res = self.exchange.place_market_order(symbol, side, size)
@@ -278,16 +260,14 @@ class BlackBirdBotV2:
                 self.exchange.close_position_market(symbol, side, size)
                 return False
 
-            # 3. Trailing (opcional, solo en modo normal)
+            # 3. Trailing (solo en modo NORMAL y leverage >= 5)
             if self.risk.mode == "NORMAL" and leverage >= 5:
                 callback_ratio = (0.5 * atr / entry) * 100
                 callback_ratio = max(0.3, min(5.0, callback_ratio))
                 activation = entry + (tp_price - entry) * 0.5 if side == 'long' else entry - (entry - tp_price) * 0.5
-                trail_res = self.exchange.place_trailing_order(symbol, tp_side, size, callback_ratio, activation)
-                if trail_res.get('ok'):
-                    log_info(f"  Trailing activado (callback: {callback_ratio:.2f}%)")
+                self.exchange.place_trailing_order(symbol, tp_side, size, callback_ratio, activation)
 
-            # Registrar posición (para monitoreo futuro)
+            # 4. Guardar posición en memoria (para métricas y seguimiento)
             self.position = {
                 'symbol': symbol,
                 'side': side,
@@ -298,7 +278,7 @@ class BlackBirdBotV2:
                 'open_time': time.time(),
             }
 
-            # Registrar en métricas
+            # 5. Registrar trade en métricas
             self.metrics.log_trade({
                 'symbol': symbol,
                 'side': side,
@@ -310,8 +290,8 @@ class BlackBirdBotV2:
                 'tp': tp_price,
                 'sl': sl_price,
                 'equity_before': self.capital,
-                'equity_after': self.capital,  # Se actualizará al cierre
-                'pnl_pct': 0,  # Se actualizará al cierre
+                'equity_after': self.capital,
+                'pnl_pct': 0,
                 'status': 'opened',
             })
 
@@ -326,29 +306,24 @@ class BlackBirdBotV2:
     # ============================================================
 
     def _emergency_shutdown(self):
-        """Cierre de emergencia por kill switch."""
         log_info("⛔ Ejecutando cierre de emergencia...")
-        # Cerrar todas las posiciones
         self.exchange.close_all_positions()
-        # Cancelar todas las órdenes
         self.exchange.cancel_all_orders()
         log_info("✅ Cierre de emergencia completado.")
 
     # ============================================================
-    # RUN (ENTRY POINT)
+    # RUN (EJECUCIÓN PRINCIPAL)
     # ============================================================
 
     def run(self) -> Dict:
-        """Ejecuta un ciclo completo."""
         start_time = time.time()
 
         if not self.init():
             return {'success': False, 'error': 'init_failed'}
 
         # FASE 1: Cleanup
-        cleanup_result = self.phase_cleanup()
+        self.phase_cleanup()
 
-        # Verificar kill switch después de cleanup
         if self.risk.is_kill_switch_activated():
             self.metrics.save_final_report()
             return {'success': False, 'error': 'kill_switch', 'reason': self.risk.get_kill_reason()}
@@ -359,7 +334,7 @@ class BlackBirdBotV2:
         # FASE 3: Ejecución
         execution_result = self.phase_execute(scoring_result)
 
-        # Métricas del ciclo
+        # Guardar métricas del ciclo
         cycle_data = {
             'symbols_scanned': scoring_result.get('symbols_scanned', 0),
             'best_symbol': scoring_result.get('symbol'),
@@ -373,7 +348,6 @@ class BlackBirdBotV2:
         }
         self.metrics.log_cycle(cycle_data)
 
-        # Reporte final
         elapsed = (time.time() - start_time)
         log_info("=" * 60)
         log_info(f"CICLO COMPLETADO en {elapsed:.2f}s")
@@ -385,7 +359,7 @@ class BlackBirdBotV2:
             log_info(f"  Score: {execution_result.get('score', 0):.3f}")
         log_info("=" * 60)
 
-        # Guardar métricas finales
+        # Guardar reporte final
         self.metrics.save_final_report()
 
         return {
@@ -413,14 +387,14 @@ def main():
         log_error("Set: OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHRASE")
         sys.exit(1)
 
-    # Adquirir lock
+    # Adquirir lock para evitar ejecuciones simultáneas
     lock_fd = acquire_lock()
     if lock_fd is None:
         log_warning("Otra instancia del bot está ejecutándose. Saliendo.")
         sys.exit(0)
 
     try:
-        bot = BlackBirdBotV2(API_KEY, SECRET_KEY, PASSPHRASE, DEMO)
+        bot = KrishnaKillingSpree(API_KEY, SECRET_KEY, PASSPHRASE, DEMO)
         result = bot.run()
         log_info(f"Resultado final: {result}")
     except Exception as e:
