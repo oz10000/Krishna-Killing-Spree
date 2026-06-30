@@ -1,32 +1,42 @@
 # utils.py
 # ============================================================
-# UTILIDADES — LOGGING, HELPERS, LOCK
+# UTILIDADES — LOGGING SIMPLE, PNL HISTORY, DASHBOARD
 # ============================================================
 
-import logging
 import os
+import csv
 import time
-import json
+import logging
 from datetime import datetime
+from typing import Dict, Optional
 
 import config
 
 # ============================================================
-# LOGGING
+# CREAR DIRECTORIOS
 # ============================================================
 
 os.makedirs(config.LOGS_DIR, exist_ok=True)
+os.makedirs(config.METRICS_DIR, exist_ok=True)
+os.makedirs(config.SNAPSHOTS_DIR, exist_ok=True)
 
+# ============================================================
+# LOGGING SIMPLE (UN SOLO ARCHIVO: logs/bot.log)
+# ============================================================
+
+LOG_FILE = os.path.join(config.LOGS_DIR, "bot.log")
+
+# Configurar logging: solo eventos importantes
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(f"{config.LOGS_DIR}/bot.log"),
-        logging.StreamHandler()
+        logging.FileHandler(LOG_FILE),
+        logging.StreamHandler()  # Para ver en consola también
     ]
 )
 
-_logger = logging.getLogger('blackbird')
+_logger = logging.getLogger('krishna')
 
 def log_info(msg):
     _logger.info(msg)
@@ -41,26 +51,97 @@ def log_debug(msg):
     _logger.debug(msg)
 
 # ============================================================
+# HISTORIAL DE PNL (metrics/pnl_history.csv)
+# ============================================================
+
+PNL_FILE = os.path.join(config.METRICS_DIR, "pnl_history.csv")
+
+def init_pnl_file():
+    """Crea el archivo CSV con cabecera si no existe."""
+    if not os.path.exists(PNL_FILE):
+        with open(PNL_FILE, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                'fecha', 'hora', 'equity', 'pnl_acumulado',
+                'pnl_ejecucion', 'trades', 'modo_riesgo'
+            ])
+
+def append_pnl_row(equity: float, pnl_total: float, pnl_ejecucion: float,
+                   trades: int, modo: str):
+    """Añade una fila al historial de PnL."""
+    init_pnl_file()
+    now = datetime.now()
+    with open(PNL_FILE, 'a', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            now.strftime('%Y-%m-%d'),
+            now.strftime('%H:%M:%S'),
+            round(equity, 2),
+            round(pnl_total, 2),
+            round(pnl_ejecucion, 2),
+            trades,
+            modo
+        ])
+
+# ============================================================
+# DASHBOARD SIMPLE (Pantalla de estado)
+# ============================================================
+
+_last_dashboard = ""
+_last_update = 0
+_DASHBOARD_INTERVAL = 5  # segundos entre actualizaciones
+
+def update_dashboard(estado: str, symbol: str = None, side: str = None,
+                     equity: float = 0.0, pnl_total: float = 0.0,
+                     trades: int = 0, modo: str = "NORMAL"):
+    """Actualiza el dashboard solo cuando hay cambios importantes."""
+    global _last_dashboard, _last_update
+
+    # Construir líneas de posición
+    pos_line = f"Posición: {symbol or 'Ninguna'}"
+    if symbol and side:
+        pos_line += f" {side.upper()}"
+
+    dashboard = f"""
+========================================
+KRISHNA KILLING SPREE
+
+Estado: {estado}
+{pos_line}
+Equity: {equity:.2f} USDT
+PnL Total: {'+' if pnl_total >= 0 else ''}{pnl_total:.2f} USDT
+Trades: {trades}
+Modo: {modo}
+========================================
+"""
+
+    # Solo actualizar si cambió o pasó el intervalo
+    now = time.time()
+    if dashboard != _last_dashboard or (now - _last_update) > _DASHBOARD_INTERVAL:
+        # Limpiar pantalla (opcional, funciona en terminales)
+        os.system('cls' if os.name == 'nt' else 'clear')
+        print(dashboard)
+        _last_dashboard = dashboard
+        _last_update = now
+
+# ============================================================
 # LOCK (para evitar ejecuciones simultáneas)
 # ============================================================
 
-LOCK_FILE = '/tmp/blackbird_v2.lock'
+LOCK_FILE = '/tmp/krishna_killing_spree.lock'
 
-def acquire_lock(timeout: int = 5) -> bool:
-    """Adquiere un lock para evitar ejecuciones simultáneas."""
+def acquire_lock(timeout: int = 5):
     try:
         import fcntl
         lock_fd = open(LOCK_FILE, 'w')
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return lock_fd
     except ImportError:
-        # Windows o entorno sin fcntl
         return True
     except Exception:
         return None
 
 def release_lock(lock_fd):
-    """Libera el lock."""
     if lock_fd and hasattr(lock_fd, 'close'):
         try:
             import fcntl
@@ -84,8 +165,3 @@ def now():
 
 def datetime_now():
     return datetime.now().isoformat()
-
-def format_pnl(pnl_pct: float) -> str:
-    if pnl_pct > 0:
-        return f"+{pnl_pct:.2f}%"
-    return f"{pnl_pct:.2f}%"
