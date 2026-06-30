@@ -1,3 +1,8 @@
+# .github/workflows/krishna.yml
+# ============================================================
+# KRISHNA KILLING SPREE — GITHUB ACTIONS WORKFLOW
+# ============================================================
+
 name: Krishna Killing Spree
 
 on:
@@ -11,23 +16,54 @@ concurrency:
 
 jobs:
   run-bot:
+    name: Ejecutar Krishna Killing Spree
     runs-on: ubuntu-latest
     timeout-minutes: 5
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: ⬇️ Checkout repositorio
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install requests numpy
-      - name: Ejecutar bot
+
+      - name: 📦 Instalar dependencias
+        run: |
+          pip install --upgrade pip
+          pip install requests numpy
+
+      - name: 📁 Crear directorios
+        run: |
+          mkdir -p metrics logs snapshots
+
+      - name: 🤖 Ejecutar Krishna Killing Spree
+        run: python main.py
         env:
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
           OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
           OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
           OKX_DEMO: ${{ secrets.OKX_DEMO || 'true' }}
-        run: python main.py
-      - uses: actions/upload-artifact@v4
+
+      - name: 📊 Subir métricas y logs
+        uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: metrics-${{ github.run_id }}
-          path: metrics/ logs/ snapshots/
+          name: krishna-data-${{ github.run_id }}
+          path: |
+            metrics/
+            logs/
+            snapshots/
+          retention-days: 30
+
+      - name: 📋 Reporte de ejecución
+        if: always()
+        run: |
+          echo "## 🔥 Krishna Killing Spree — Reporte" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Métrica | Valor |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Timestamp | $(date -u '+%Y-%m-%d %H:%M:%S UTC') |" >> $GITHUB_STEP_SUMMARY
+          echo "| Workflow | ${{ github.workflow }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Run ID | ${{ github.run_id }} |" >> $GITHUB_STEP_SUMMARY
