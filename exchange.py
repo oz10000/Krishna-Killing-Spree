@@ -1,16 +1,16 @@
 # exchange.py
 # ============================================================
-# CLIENTE OKX V5 — KRISHNA KILLING SPREE (REGENERADO)
+# CLIENTE OKX V5 — KRISHNA KILLING SPREE (EQUIVALENTE A BLACKBIRDOFPREY)
 # ============================================================
-# Basado en el cliente funcional de BlackBirdOfPrey.
-# Compatible con OKX API V5, Demo y Producción.
-# Incluye todas las correcciones necesarias para órdenes.
+# Versión completamente regenerada para ser funcionalmente equivalente
+# al repositorio BlackBirdOfPrey en toda la comunicación con OKX.
 # ============================================================
 
 import hmac
 import hashlib
 import base64
 import time
+import math
 import json
 import requests
 from datetime import datetime
@@ -22,11 +22,10 @@ import config
 class Exchange:
     def __init__(self, api_key: str, secret_key: str, passphrase: str, demo: bool = True):
         self.api_key = api_key
-        self.secret_key = secret_key  # Se codificará en la firma
+        self.secret_key = secret_key
         self.passphrase = passphrase
         self.demo = demo
 
-        # OKX usa la misma URL para demo y producción
         self.base_url = "https://www.okx.com"
         self.session = requests.Session()
         self.session.headers.update({
@@ -38,21 +37,53 @@ class Exchange:
         self._connected = False
         self._time_offset = 0
         self._last_sync_time = 0
-        self._sync_interval = 60  # segundos
+        self._sync_interval = 60
         self._instrument_cache = {}
         self._account_mode = None
         self._account_mode_fetched = False
+        self._margin_mode = "cross"
+        self._margin_mode_fetched = False
 
     # ============================================================
-    # UTILIDADES DE SÍMBOLOS
+    # UTILIDADES DE SÍMBOLOS Y TAMAÑO
     # ============================================================
 
     def _instrument_id(self, symbol: str) -> str:
-        """Convierte símbolos al formato OKX V5 (BTC → BTC-USDT-SWAP)."""
+        """Convierte símbolo al formato OKX V5 (BTC → BTC-USDT-SWAP)."""
         symbol = symbol.upper().strip()
         if symbol.endswith("-USDT-SWAP"):
             return symbol
         return f"{symbol}-USDT-SWAP"
+
+    def _to_str_size(self, size: float, lot_sz: float) -> str:
+        """Formatea el tamaño según el lot size del instrumento."""
+        if lot_sz == 0:
+            return str(int(size))
+        decimals = max(0, -int(round(math.log10(lot_sz))))
+        return f"{size:.{decimals}f}"
+
+    def _get_margin_mode(self) -> str:
+        """Obtiene dinámicamente el modo de margen de la cuenta (cross/isolated)."""
+        if self._margin_mode_fetched:
+            return self._margin_mode
+
+        try:
+            result = self._request('GET', '/api/v5/account/config')
+            if result.get('ok'):
+                data = result.get('data', [])
+                if data:
+                    # acctLv: 1 = isolated, 2 = cross, 3 = both
+                    acct_lv = data[0].get('acctLv', '2')
+                    self._margin_mode = "isolated" if acct_lv == "1" else "cross"
+                else:
+                    self._margin_mode = "cross"
+            else:
+                self._margin_mode = "cross"
+        except Exception:
+            self._margin_mode = "cross"
+
+        self._margin_mode_fetched = True
+        return self._margin_mode
 
     # ============================================================
     # AUTENTICACIÓN Y FIRMA
@@ -86,29 +117,8 @@ class Exchange:
         if not self._sync_time(force=False):
             self._sync_time(force=True)
 
-    def _get_account_mode(self) -> str:
-        """Obtiene el modo de cuenta (si es necesario para algunas operaciones)."""
-        if self._account_mode_fetched:
-            return self._account_mode
-
-        try:
-            result = self._request('GET', '/api/v5/account/config')
-            if result.get('ok'):
-                data = result.get('data', [])
-                if data:
-                    self._account_mode = data[0].get('acctLv', '')
-            self._account_mode_fetched = True
-        except Exception:
-            pass
-
-        return self._account_mode
-
     def _sign_request(self, method: str, path: str, params: dict = None, body: dict = None) -> Tuple[Dict, str]:
-        """
-        Genera firma HMAC-SHA256 para OKX V5.
-        Incluye correctamente los parámetros de la query string.
-        """
-        # Sincronizar tiempo antes de firmar
+        """Genera firma HMAC-SHA256 para OKX V5 con soporte para query string."""
         self._ensure_time_synced()
 
         timestamp = self._iso_timestamp()
@@ -119,15 +129,14 @@ class Exchange:
         else:
             body_str = ""
 
-        # 🔥 CRÍTICO: Incluir query params en la firma
+        # Incluir query params en la firma (CRÍTICO)
         if params:
-            # Ordenar y formatear parámetros
             query = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
             full_path = f"{path}?{query}"
         else:
             full_path = path
 
-        # String a firmar: timestamp + method + full_path (con query) + body
+        # String a firmar: timestamp + method + full_path + body
         sign_str = timestamp + method + full_path + body_str
 
         # HMAC-SHA256
@@ -148,7 +157,7 @@ class Exchange:
             'Content-Type': 'application/json'
         }
 
-        # 🔥 CRÍTICO: Cabecera para modo demo
+        # Modo demo
         if self.demo:
             headers["x-simulated-trading"] = "1"
 
@@ -156,9 +165,7 @@ class Exchange:
 
     def _request(self, method: str, path: str, params: dict = None, body: dict = None,
                  max_retries: int = 3, retry_delay: float = 1.0) -> dict:
-        """
-        Realiza una petición autenticada a OKX con reintentos exponenciales.
-        """
+        """Realiza una petición autenticada a OKX con reintentos exponenciales."""
         url = f"{self.base_url}{path}"
 
         # Query string
@@ -167,7 +174,6 @@ class Exchange:
             import urllib.parse
             query_str = '?' + urllib.parse.urlencode(params)
 
-        # Generar firma y cabeceras (incluye query params)
         headers, body_str = self._sign_request(method, path, params, body)
 
         for attempt in range(max_retries):
@@ -188,7 +194,6 @@ class Exchange:
 
                 # Manejar códigos de error HTTP
                 if response.status_code == 429:
-                    # Rate limit - esperar y reintentar
                     sleep_time = retry_delay * (2 ** attempt)
                     time.sleep(sleep_time)
                     continue
@@ -196,9 +201,7 @@ class Exchange:
                 response.raise_for_status()
                 data = response.json()
 
-                # Error de OKX
                 if data.get('code') != '0':
-                    # Si es error de rate limit (429), reintentar
                     if data.get('code') == '429':
                         sleep_time = retry_delay * (2 ** attempt)
                         time.sleep(sleep_time)
@@ -359,24 +362,23 @@ class Exchange:
         return {'ok': True, 'data': result.get('data', [])}
 
     # ============================================================
-    # ÓRDENES (CORREGIDAS SEGÚN OKX V5)
+    # ÓRDENES (EQUIVALENTES A BLACKBIRDOFPREY)
     # ============================================================
 
     def place_market_order(self, symbol: str, side: str, size: float) -> Dict:
-        """
-        Coloca una orden de mercado en OKX V5.
-        Incluye tdMode, posSide, y usa el campo 'sz' (no 'size').
-        """
+        """Coloca una orden de mercado en OKX V5."""
         inst = self._instrument_id(symbol)
         pos_side = "long" if side.lower() == "buy" else "short"
+        lot_sz = self.get_instrument_info(symbol).get('lotSz', 0.001)
+        sz_str = self._to_str_size(size, lot_sz)
 
         body = {
             "instId": inst,
-            "tdMode": "cross",
+            "tdMode": self._get_margin_mode(),
             "side": side.lower(),
             "posSide": pos_side,
             "ordType": "market",
-            "sz": str(size),
+            "sz": sz_str,
         }
 
         result = self._request("POST", "/api/v5/trade/order", body=body)
@@ -388,18 +390,17 @@ class Exchange:
     def place_conditional_order(self, symbol: str, side: str, size: float,
                                 trigger_price: float, order_price: str = '-1',
                                 trigger_px_type: str = 'last', pos_side: str = 'long') -> Dict:
-        """
-        Coloca una orden condicional (TP/SL) en OKX V5.
-        Usa ordType 'trigger' (no 'conditional').
-        """
+        """Coloca una orden condicional (TP/SL) en OKX V5."""
         inst = self._instrument_id(symbol)
+        lot_sz = self.get_instrument_info(symbol).get('lotSz', 0.001)
+        sz_str = self._to_str_size(size, lot_sz)
 
         body = {
             "instId": inst,
-            "tdMode": "cross",
+            "tdMode": self._get_margin_mode(),
             "side": side.lower(),
             "ordType": "trigger",
-            "sz": str(size),
+            "sz": sz_str,
             "triggerPx": str(trigger_price),
             "orderPx": str(order_price),
             "triggerPxType": trigger_px_type,
@@ -414,18 +415,18 @@ class Exchange:
 
     def place_trailing_order(self, symbol: str, side: str, size: float,
                              callback_ratio: float, trigger_price: float) -> Dict:
-        """
-        Coloca un trailing stop en OKX V5 (move_order_stop).
-        """
+        """Coloca un trailing stop en OKX V5."""
         inst = self._instrument_id(symbol)
         pos_side = "long" if side.lower() == "sell" else "short"
+        lot_sz = self.get_instrument_info(symbol).get('lotSz', 0.001)
+        sz_str = self._to_str_size(size, lot_sz)
 
         body = {
             "instId": inst,
-            "tdMode": "cross",
+            "tdMode": self._get_margin_mode(),
             "side": side.lower(),
             "ordType": "move_order_stop",
-            "sz": str(size),
+            "sz": sz_str,
             "callbackRatio": str(round(callback_ratio, 2)),
             "triggerPx": str(round(trigger_price, 2)),
             "posSide": pos_side,
@@ -456,18 +457,19 @@ class Exchange:
     def cancel_all_orders(self, symbol: str = None) -> int:
         """Cancela todas las órdenes (opcionalmente por símbolo)."""
         count = 0
-        # Órdenes normales
+
         pending = self.get_pending_orders(symbol)
         if pending.get('ok'):
             for order in pending.get('data', []):
                 if self.cancel_order(order.get('ordId')):
                     count += 1
-        # Órdenes algorítmicas
+
         algo = self.get_pending_algo_orders(symbol)
         if algo.get('ok'):
             for order in algo.get('data', []):
                 if self.cancel_algo_order(order.get('algoId')):
                     count += 1
+
         return count
 
     def close_position_market(self, symbol: str, side: str, size: float) -> Dict:
@@ -481,6 +483,7 @@ class Exchange:
         positions = self.get_positions()
         if not positions.get('ok'):
             return 0
+
         for pos in positions.get('data', []):
             symbol = pos.get('instId')
             side = pos.get('posSide', 'long')
@@ -488,6 +491,7 @@ class Exchange:
             if size > 0:
                 self.close_position_market(symbol, side, size)
                 count += 1
+
         return count
 
     def connect(self) -> bool:
