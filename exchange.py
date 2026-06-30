@@ -1,8 +1,9 @@
 # exchange.py
 # ============================================================
-# CLIENTE OKX V5 — COPIADO DEL REPOSITORIO ORIGINAL
+# CLIENTE OKX V5 — REGENERADO PARA KRISHNA KILLING SPREE
 # ============================================================
-# https://github.com/oz10000/BlackBirdOfPrey
+# Basado en el cliente funcional de BlackBirdOfPrey.
+# Compatible con OKX API V5, Demo y Producción.
 # ============================================================
 
 import hmac
@@ -12,7 +13,7 @@ import time
 import json
 import requests
 from datetime import datetime
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Tuple
 
 import config
 
@@ -20,17 +21,26 @@ import config
 class Exchange:
     def __init__(self, api_key: str, secret_key: str, passphrase: str, demo: bool = True):
         self.api_key = api_key
-        self.secret_key = secret_key.encode('utf-8')
+        self.secret_key = secret_key  # Se codificará en la firma
         self.passphrase = passphrase
         self.demo = demo
-        self.base_url = "https://www.okx.com" if not demo else "https://www.okx.com"
+
+        # OKX usa la misma URL para demo y producción
+        self.base_url = "https://www.okx.com"
         self.session = requests.Session()
         self.session.headers.update({
             'Content-Type': 'application/json',
-            'User-Agent': 'BlackBird-Bot/2.0'
+            'User-Agent': 'Krishna-Killing-Spree/2.0'
         })
-        self.time_offset = 0
+
+        # Estado interno
+        self._connected = False
+        self._time_offset = 0
+        self._last_sync_time = 0
+        self._sync_interval = 60  # segundos
         self._instrument_cache = {}
+        self._account_mode = None
+        self._account_mode_fetched = False
 
     # ============================================================
     # AUTENTICACIÓN Y FIRMA
@@ -39,30 +49,86 @@ class Exchange:
     def _iso_timestamp(self) -> str:
         return datetime.utcnow().isoformat(timespec='milliseconds') + 'Z'
 
-    def _sync_time(self) -> int:
+    def _sync_time(self, force: bool = False) -> bool:
         """Sincroniza el tiempo con el servidor OKX."""
+        now = time.time()
+        if not force and (now - self._last_sync_time) < self._sync_interval:
+            return True
+
         try:
-            resp = self.session.get(f"{self.base_url}/api/v5/public/time", timeout=5)
-            if resp.status_code == 200:
-                data = resp.json()
+            response = self.session.get(f"{self.base_url}/api/v5/public/time", timeout=5)
+            if response.status_code == 200:
+                data = response.json()
                 if data.get('code') == '0':
                     server_time = int(data['data'][0]['ts'])
-                    local_time = int(time.time() * 1000)
-                    self.time_offset = server_time - local_time
-                    return server_time
+                    local_time = int(now * 1000)
+                    self._time_offset = server_time - local_time
+                    self._last_sync_time = now
+                    return True
         except Exception:
             pass
-        return 0
+        return False
 
-    def _sign_request(self, method: str, path: str, body: str = '') -> Dict:
-        """Genera firma HMAC-SHA256 para OKX V5."""
+    def _ensure_time_synced(self) -> None:
+        """Asegura que el tiempo esté sincronizado (fuerza si es necesario)."""
+        if not self._sync_time(force=False):
+            self._sync_time(force=True)
+
+    def _get_account_mode(self) -> str:
+        """Obtiene el modo de cuenta (si es necesario para algunas operaciones)."""
+        if self._account_mode_fetched:
+            return self._account_mode
+
+        try:
+            result = self._request('GET', '/api/v5/account/config')
+            if result.get('ok'):
+                data = result.get('data', [])
+                if data:
+                    self._account_mode = data[0].get('acctLv', '')
+            self._account_mode_fetched = True
+        except Exception:
+            pass
+
+        return self._account_mode
+
+    def _sign_request(self, method: str, path: str, params: dict = None, body: dict = None) -> Tuple[Dict, str]:
+        """
+        Genera firma HMAC-SHA256 para OKX V5.
+        Incluye correctamente los parámetros de la query string.
+        """
+        # Sincronizar tiempo antes de firmar
+        self._ensure_time_synced()
+
         timestamp = self._iso_timestamp()
-        sign_str = timestamp + method + path + body
-        signature = base64.b64encode(
-            hmac.new(self.secret_key, sign_str.encode('utf-8'), hashlib.sha256).digest()
-        ).decode('utf-8')
 
-        return {
+        # Body string (ordenado para consistencia)
+        if body:
+            body_str = json.dumps(body, separators=(', ', ': '), sort_keys=True)
+        else:
+            body_str = ""
+
+        # 🔥 CRÍTICO: Incluir query params en la firma
+        if params:
+            # Ordenar y formatear parámetros
+            query = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+            full_path = f"{path}?{query}"
+        else:
+            full_path = path
+
+        # String a firmar: timestamp + method + full_path (con query) + body
+        sign_str = timestamp + method + full_path + body_str
+
+        # HMAC-SHA256
+        signature = base64.b64encode(
+            hmac.new(
+                self.secret_key.encode('utf-8'),
+                sign_str.encode('utf-8'),
+                hashlib.sha256
+            ).digest()
+        ).decode()
+
+        # Cabeceras
+        headers = {
             'OK-ACCESS-KEY': self.api_key,
             'OK-ACCESS-SIGN': signature,
             'OK-ACCESS-TIMESTAMP': timestamp,
@@ -70,43 +136,82 @@ class Exchange:
             'Content-Type': 'application/json'
         }
 
+        # 🔥 CRÍTICO: Cabecera para modo demo
+        if self.demo:
+            headers["x-simulated-trading"] = "1"
+
+        return headers, body_str
+
     def _request(self, method: str, path: str, params: dict = None, body: dict = None,
-                 max_retries: int = 3) -> dict:
-        """Realiza una petición autenticada o pública con reintentos."""
+                 max_retries: int = 3, retry_delay: float = 1.0) -> dict:
+        """
+        Realiza una petición autenticada a OKX con reintentos exponenciales.
+        """
         url = f"{self.base_url}{path}"
 
+        # Query string
         query_str = ''
         if params:
             import urllib.parse
             query_str = '?' + urllib.parse.urlencode(params)
 
-        body_str = json.dumps(body) if body else ''
-        headers = self._sign_request(method, path + query_str, body_str)
+        # Generar firma y cabeceras (incluye query params)
+        headers, body_str = self._sign_request(method, path, params, body)
 
         for attempt in range(max_retries):
             try:
                 if method.upper() == 'GET':
-                    response = self.session.get(url + query_str, headers=headers, timeout=10)
+                    response = self.session.get(
+                        url + query_str,
+                        headers=headers,
+                        timeout=10
+                    )
                 else:
-                    response = self.session.post(url + query_str, headers=headers, data=body_str, timeout=10)
+                    response = self.session.post(
+                        url + query_str,
+                        headers=headers,
+                        data=body_str,
+                        timeout=10
+                    )
+
+                # Manejar códigos de error HTTP
+                if response.status_code == 429:
+                    # Rate limit - esperar y reintentar
+                    sleep_time = retry_delay * (2 ** attempt)
+                    time.sleep(sleep_time)
+                    continue
 
                 response.raise_for_status()
                 data = response.json()
 
+                # Error de OKX
                 if data.get('code') != '0':
-                    # Si es error de rate limit, esperar y reintentar
+                    # Si es error de rate limit (429), reintentar
                     if data.get('code') == '429':
-                        time.sleep(2 ** attempt)
+                        sleep_time = retry_delay * (2 ** attempt)
+                        time.sleep(sleep_time)
                         continue
-                    return {'ok': False, 'error': data.get('msg', 'Unknown error'), 'data': None}
+                    return {
+                        'ok': False,
+                        'error': data.get('msg', 'Unknown error'),
+                        'data': None,
+                        'code': data.get('code')
+                    }
 
                 return {'ok': True, 'error': None, 'data': data.get('data', [])}
 
+            except requests.exceptions.Timeout:
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay * (2 ** attempt))
+                    continue
+                return {'ok': False, 'error': 'Timeout', 'data': None}
+
             except requests.exceptions.RequestException as e:
                 if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
+                    time.sleep(retry_delay * (2 ** attempt))
                     continue
                 return {'ok': False, 'error': str(e), 'data': None}
+
             except Exception as e:
                 return {'ok': False, 'error': str(e), 'data': None}
 
@@ -117,10 +222,7 @@ class Exchange:
     # ============================================================
 
     def fetch_historical_candles(self, symbol: str, limit: int = 100, bar: str = '5m') -> Optional[dict]:
-        """
-        Descarga velas históricas desde OKX Public API.
-        Retorna dict con listas: ts, o, h, l, c, v.
-        """
+        """Descarga velas históricas desde OKX Public API."""
         url = f"{self.base_url}/api/v5/market/candles"
         params = {'instId': symbol, 'bar': bar, 'limit': limit}
 
@@ -132,7 +234,7 @@ class Exchange:
                 return None
 
             candles = data['data']
-            result = {
+            return {
                 'ts': [c[0] for c in candles],
                 'o': [float(c[1]) for c in candles],
                 'h': [float(c[2]) for c in candles],
@@ -140,8 +242,6 @@ class Exchange:
                 'c': [float(c[4]) for c in candles],
                 'v': [float(c[5]) for c in candles],
             }
-            return result
-
         except Exception:
             return None
 
@@ -343,7 +443,15 @@ class Exchange:
         return count
 
     def connect(self) -> bool:
-        """Verifica la conexión con OKX."""
-        self._sync_time()
-        result = self._request('GET', '/api/v5/account/balance')
-        return result.get('ok', False)
+        """Verifica la conexión con OKX (con reintentos)."""
+        self._sync_time(force=True)
+
+        for attempt in range(3):
+            result = self._request('GET', '/api/v5/account/balance')
+            if result.get('ok'):
+                self._connected = True
+                return True
+            time.sleep(2 ** attempt)
+
+        self._connected = False
+        return False
