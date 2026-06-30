@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-KRISHNA KILLING SPREE — MAIN.PY COMPLETO
-Versión con corrección de serialización y logs detallados de OKX.
+KRISHNA KILLING SPREE — MAIN.PY (VERSIÓN CON MARGEN CORREGIDO)
 """
 
 import os
@@ -16,9 +15,6 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Tuple, Union
 from collections import deque, defaultdict
 
-# ============================================================
-# IMPORTS DE MÓDULOS DEL SISTEMA
-# ============================================================
 from exchange import Exchange, safe_float
 from strategy import Strategy
 from risk import RiskController
@@ -48,11 +44,9 @@ LOGS_DIR = "logs"
 SNAPSHOTS_DIR = "snapshots"
 
 # ============================================================
-# TRACE ENGINE (AUDITORÍA)
+# TRACE ENGINE
 # ============================================================
 class TradeTrace:
-    """Sistema de auditoría paso a paso para cada trade."""
-
     STEPS = [
         "SYMBOL_SELECTED",
         "MARKET_DATA_LOADED",
@@ -106,35 +100,25 @@ class TradeTrace:
         }
 
     def diagnose(self) -> str:
-        """Diagnóstico automático de la causa de fallo."""
         if self.success:
             return "OK"
         if self.fail_step is None:
             return "UNKNOWN (no steps logged)"
 
-        if self.fail_step == "SYMBOL_SELECTED":
-            return "STRATEGY_ISSUE: No se seleccionó ningún símbolo"
-        elif self.fail_step == "MARKET_DATA_LOADED":
-            return "DATA_ISSUE: No se pudieron cargar datos de mercado"
-        elif self.fail_step == "SIGNAL_GENERATED":
-            return "STRATEGY_ISSUE: No se generó señal válida"
-        elif self.fail_step == "SIGNAL_VALIDATION":
-            return "FILTER_ISSUE: La señal fue bloqueada por filtros internos"
-        elif self.fail_step == "RISK_CHECK":
-            return "RISK_ISSUE: El control de riesgo bloqueó la operación"
-        elif self.fail_step == "ORDER_BUILT":
-            return "VALIDATION_ISSUE: Error en la construcción de la orden"
-        elif self.fail_step == "EXCHANGE_VALIDATION":
-            return "EXCHANGE_ISSUE: Validación previa a OKX falló (instrumento, tamaño, etc)"
-        elif self.fail_step == "ORDER_SENT":
-            return "EXCHANGE_ISSUE: OKX rechazó la orden (revisar logs)"
-        elif self.fail_step == "OKX_RESPONSE":
-            return "EXCHANGE_ISSUE: Respuesta de OKX con error"
-        else:
-            return f"UNKNOWN (step: {self.fail_step})"
+        mapping = {
+            "SYMBOL_SELECTED": "STRATEGY_ISSUE: No se seleccionó ningún símbolo",
+            "MARKET_DATA_LOADED": "DATA_ISSUE: No se pudieron cargar datos de mercado",
+            "SIGNAL_GENERATED": "STRATEGY_ISSUE: No se generó señal válida",
+            "SIGNAL_VALIDATION": "FILTER_ISSUE: La señal fue bloqueada por filtros internos",
+            "RISK_CHECK": "RISK_ISSUE: El control de riesgo bloqueó la operación",
+            "ORDER_BUILT": "VALIDATION_ISSUE: Error en la construcción de la orden",
+            "EXCHANGE_VALIDATION": "EXCHANGE_ISSUE: Validación previa a OKX falló",
+            "ORDER_SENT": "EXCHANGE_ISSUE: OKX rechazó la orden",
+            "OKX_RESPONSE": "EXCHANGE_ISSUE: Respuesta de OKX con error"
+        }
+        return mapping.get(self.fail_step, f"UNKNOWN (step: {self.fail_step})")
 
     def to_dict(self) -> Dict:
-        """Convierte el objeto a diccionario para serialización JSON."""
         return {
             'success': self.success,
             'fail_step': self.fail_step,
@@ -165,7 +149,6 @@ class KrishnaKillingSpree:
         self.instrument_info = {}
         self._last_mode = "NORMAL"
 
-        # Estadísticas de diagnóstico
         self.stats = {
             'symbols_processed': 0,
             'signals_generated': 0,
@@ -183,7 +166,7 @@ class KrishnaKillingSpree:
         self.valid_instruments = {}
 
     # ============================================================
-    # INICIALIZACIÓN (CORREGIDA — LECTURA DE BALANCE)
+    # INICIALIZACIÓN
     # ============================================================
     def init(self) -> bool:
         log_info("🔥 KRISHNA KILLING SPREE — INICIO")
@@ -194,17 +177,12 @@ class KrishnaKillingSpree:
             return False
         log_info("Conexión OKX establecida.")
 
-        # ============================================================
-        # 🔍 LECTURA DE BALANCE CORREGIDA CON LOGS Y DOBLE FORMATO
-        # ============================================================
         bal = self.exchange.get_balance()
         log_debug(f"Balance response: {bal}")
 
         if bal.get('ok'):
             data = bal.get('data', [])
             found = False
-
-            # Formato estándar de OKX
             for detail in data:
                 for asset in detail.get('details', []):
                     if asset.get('ccy') == 'USDT':
@@ -215,14 +193,11 @@ class KrishnaKillingSpree:
                         break
                 if found:
                     break
-
-            # Formato alternativo (simplificado)
             if not found and 'USDT' in bal:
                 self.capital = safe_float(bal['USDT'].get('available'))
                 self.last_equity = self.capital
                 log_info(f"✅ Capital disponible (alternativo): {self.capital:.2f} USDT")
                 found = True
-
             if not found:
                 log_warning("No se encontró USDT en la respuesta de balance.")
                 self.capital = CAPITAL_INICIAL
@@ -232,11 +207,9 @@ class KrishnaKillingSpree:
             self.capital = CAPITAL_INICIAL
             self.last_equity = self.capital
 
-        # Si el capital sigue siendo el inicial (por fallo), mostrar advertencia
         if self.capital == CAPITAL_INICIAL:
             log_warning(f"⚠️ Usando capital inicial por defecto: {CAPITAL_INICIAL:.2f} USDT")
 
-        # Obtener info de instrumentos
         log_info("Obteniendo información de instrumentos...")
         for sym in SYMBOLS:
             try:
@@ -259,14 +232,11 @@ class KrishnaKillingSpree:
         log_info(f"Apalancamiento base: {BASE_LEVERAGE}x")
         return True
 
-    # ============================================================
-    # VALIDACIÓN DE SÍMBOLO
-    # ============================================================
     def validate_symbol(self, symbol: str) -> bool:
         return self.valid_instruments.get(symbol, False)
 
     # ============================================================
-    # PROCESAMIENTO DE UN SÍMBOLO (RESILIENTE)
+    # PROCESAMIENTO DE SÍMBOLO (CON CÁLCULO DE MARGEN CORREGIDO)
     # ============================================================
     def process_symbol(self, symbol: str) -> Dict:
         trace = TradeTrace()
@@ -362,7 +332,7 @@ class KrishnaKillingSpree:
 
                 trace.log_success("RISK_CHECK", {"mode": self.risk.mode, "leverage": params['leverage']})
 
-                # ORDER_BUILT
+                # ORDER_BUILT — CON CÁLCULO DE MARGEN CORREGIDO
                 try:
                     ticker = self.exchange._request("GET", "/api/v5/market/ticker", params={"instId": symbol})
                     if not ticker.get('ok') or not ticker.get('data'):
@@ -387,10 +357,23 @@ class KrishnaKillingSpree:
                     lot_sz = info.get('lot_size', 0.001)
                     min_sz = info.get('min_sz', 0.001)
 
-                    available = self.capital * 0.98
+                    # 🔥 CORRECCIÓN AQUÍ: usar 85% del capital (antes 98%)
+                    capital_factor = 0.85
+                    available = self.capital * capital_factor
                     desired_notional = available * params['leverage'] * params['size_factor']
+
                     size = desired_notional / (entry * ct_val)
                     size = max(min_sz, round(size / lot_sz) * lot_sz)
+
+                    # Verificar margen estimado contra balance real
+                    estimated_margin = (entry * size * ct_val) / params['leverage']
+                    required_margin = estimated_margin * 1.1  # buffer 10%
+
+                    if required_margin > self.capital:
+                        trace.log_fail("ORDER_BUILT", f"Margen insuficiente: {required_margin:.2f} USDT > {self.capital:.2f} USDT")
+                        self.stats['blocked_by_validator'] += 1
+                        result['reason'] = 'INSUFFICIENT_MARGIN'
+                        return result
 
                     if size <= 0:
                         trace.log_fail("ORDER_BUILT", f"Tamaño inválido: {size}")
@@ -424,7 +407,8 @@ class KrishnaKillingSpree:
                         'side': side,
                         'tp': tp_price,
                         'sl': sl_price,
-                        'leverage': params['leverage']
+                        'leverage': params['leverage'],
+                        'estimated_margin': required_margin
                     })
                     self.stats['orders_attempted'] += 1
 
@@ -454,12 +438,11 @@ class KrishnaKillingSpree:
                     trace.log_step("ORDER_SENT", {"response": order_res})
                     self.stats['orders_sent'] += 1
 
-                    # OKX_RESPONSE — CON LOG DETALLADO
+                    # OKX_RESPONSE
                     if not order_res.get('ok'):
                         error_msg = order_res.get('error', 'Unknown error')
                         raw = order_res.get('raw')
                         if raw:
-                            # Extraer mensaje detallado de OKX
                             sMsg = ''
                             if 'data' in raw and raw['data']:
                                 sMsg = raw['data'][0].get('sMsg', '')
@@ -536,7 +519,7 @@ class KrishnaKillingSpree:
             log_error(f"Error en cleanup: {e}")
 
     # ============================================================
-    # PNL Y MÉTRICAS (CORREGIDA — SERIALIZACIÓN DE TRACES)
+    # PNL Y MÉTRICAS
     # ============================================================
     def _append_pnl_row(self, equity: float, pnl_total: float, pnl_ejecucion: float,
                         trades: int, modo: str) -> None:
@@ -562,7 +545,6 @@ class KrishnaKillingSpree:
         os.makedirs(METRICS_DIR, exist_ok=True)
         filename = f"{METRICS_DIR}/report_final_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
 
-        # Convertir objetos TradeTrace a diccionarios serializables
         traces_serializable = [trace.to_dict() for trace in self.stats['traces']]
 
         stats_serializable = {
@@ -642,7 +624,7 @@ class KrishnaKillingSpree:
         log_info("=" * 60)
 
     # ============================================================
-    # RUN — LOOP RESILIENTE
+    # RUN
     # ============================================================
     def run(self) -> Dict:
         start_time = time.time()
