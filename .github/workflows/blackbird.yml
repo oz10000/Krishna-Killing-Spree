@@ -1,27 +1,27 @@
 # .github/workflows/krishna.yml
 # ============================================================
-# KRISHNA KILLING SPREE — GITHUB ACTIONS WORKFLOW
+# EJECUCIÓN CONTINUA CON REINICIO CADA 5 HORAS
 # ============================================================
 
 name: Krishna Killing Spree
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "0 */5 * * *"   # Cada 5 horas (00:00, 05:00, 10:00, ...)
   workflow_dispatch:
 
 concurrency:
   group: krishna-bot
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   run-bot:
     name: Ejecutar Krishna Killing Spree
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 360     # 6 horas (seguro, el cron reinicia a las 5h)
 
     steps:
-      - name: ⬇️ Checkout repositorio
+      - name: ⬇️ Checkout
         uses: actions/checkout@v4
 
       - name: 🐍 Setup Python
