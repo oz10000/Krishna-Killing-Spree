@@ -1,6 +1,6 @@
 # utils.py
 # ============================================================
-# UTILIDADES — LOGGING SIMPLE, PNL HISTORY, DASHBOARD
+# UTILIDADES — LOGGING, PNL HISTORY, DASHBOARD, LOCK
 # ============================================================
 
 import os
@@ -21,18 +21,17 @@ os.makedirs(config.METRICS_DIR, exist_ok=True)
 os.makedirs(config.SNAPSHOTS_DIR, exist_ok=True)
 
 # ============================================================
-# LOGGING SIMPLE (UN SOLO ARCHIVO: logs/bot.log)
+# LOGGING SIMPLE
 # ============================================================
 
 LOG_FILE = os.path.join(config.LOGS_DIR, "bot.log")
 
-# Configurar logging: solo eventos importantes
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler(LOG_FILE),
-        logging.StreamHandler()  # Para ver en consola también
+        logging.StreamHandler()
     ]
 )
 
@@ -51,13 +50,12 @@ def log_debug(msg):
     _logger.debug(msg)
 
 # ============================================================
-# HISTORIAL DE PNL (metrics/pnl_history.csv)
+# HISTORIAL DE PNL
 # ============================================================
 
 PNL_FILE = os.path.join(config.METRICS_DIR, "pnl_history.csv")
 
 def init_pnl_file():
-    """Crea el archivo CSV con cabecera si no existe."""
     if not os.path.exists(PNL_FILE):
         with open(PNL_FILE, 'w', newline='') as f:
             writer = csv.writer(f)
@@ -68,7 +66,6 @@ def init_pnl_file():
 
 def append_pnl_row(equity: float, pnl_total: float, pnl_ejecucion: float,
                    trades: int, modo: str):
-    """Añade una fila al historial de PnL."""
     init_pnl_file()
     now = datetime.now()
     with open(PNL_FILE, 'a', newline='') as f:
@@ -84,20 +81,18 @@ def append_pnl_row(equity: float, pnl_total: float, pnl_ejecucion: float,
         ])
 
 # ============================================================
-# DASHBOARD SIMPLE (Pantalla de estado)
+# DASHBOARD SIMPLE
 # ============================================================
 
 _last_dashboard = ""
 _last_update = 0
-_DASHBOARD_INTERVAL = 5  # segundos entre actualizaciones
+_DASHBOARD_INTERVAL = 5
 
 def update_dashboard(estado: str, symbol: str = None, side: str = None,
                      equity: float = 0.0, pnl_total: float = 0.0,
                      trades: int = 0, modo: str = "NORMAL"):
-    """Actualiza el dashboard solo cuando hay cambios importantes."""
     global _last_dashboard, _last_update
 
-    # Construir líneas de posición
     pos_line = f"Posición: {symbol or 'Ninguna'}"
     if symbol and side:
         pos_line += f" {side.upper()}"
@@ -115,17 +110,15 @@ Modo: {modo}
 ========================================
 """
 
-    # Solo actualizar si cambió o pasó el intervalo
     now = time.time()
     if dashboard != _last_dashboard or (now - _last_update) > _DASHBOARD_INTERVAL:
-        # Limpiar pantalla (opcional, funciona en terminales)
         os.system('cls' if os.name == 'nt' else 'clear')
         print(dashboard)
         _last_dashboard = dashboard
         _last_update = now
 
 # ============================================================
-# LOCK (para evitar ejecuciones simultáneas)
+# LOCK
 # ============================================================
 
 LOCK_FILE = '/tmp/krishna_killing_spree.lock'
