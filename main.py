@@ -1,28 +1,141 @@
-# main.py
-# ============================================================
-# KRISHNA KILLING SPREE — BUCLE PRINCIPAL (STATELESS)
-# ============================================================
-# Flujo: init → cleanup → scoring → execute → log → exit
-# ============================================================
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+KRISHNA KILLING SPREE — MAIN.PY COMPLETO
+Versión con corrección de balance, TradeTrace y loop resiliente.
+"""
 
 import os
 import sys
 import time
-from datetime import datetime
-from typing import Dict
+import json
+import csv
+import traceback
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Any, Tuple, Union
+from collections import deque, defaultdict
 
-import config
-from exchange import Exchange
+# ============================================================
+# IMPORTS DE MÓDULOS DEL SISTEMA
+# ============================================================
+from exchange import Exchange, safe_float
 from strategy import Strategy
 from risk import RiskController
-from metrics import MetricsCollector
-from utils import (
-    log_info, log_warning, log_error, log_debug,
-    update_dashboard, append_pnl_row, init_pnl_file,
-    acquire_lock, release_lock
-)
+from utils import log_info, log_warning, log_error, log_debug, log_success
 
+# ============================================================
+# CONFIGURACIÓN
+# ============================================================
+SYMBOLS = [
+    "BTC-USDT-SWAP",
+    "ETH-USDT-SWAP",
+    "SOL-USDT-SWAP",
+    "ADA-USDT-SWAP",
+    "XRP-USDT-SWAP",
+    "AVAX-USDT-SWAP",
+]
 
+CAPITAL_INICIAL = 100.0
+BASE_LEVERAGE = 7
+MIN_SCORE = 0.45
+TP_MULT = 1.2
+SL_MULT = 1.0
+COOLDOWN_SECONDS = 15 * 60
+
+METRICS_DIR = "metrics"
+LOGS_DIR = "logs"
+SNAPSHOTS_DIR = "snapshots"
+
+# ============================================================
+# TRACE ENGINE (AUDITORÍA)
+# ============================================================
+class TradeTrace:
+    """Sistema de auditoría paso a paso para cada trade."""
+
+    STEPS = [
+        "SYMBOL_SELECTED",
+        "MARKET_DATA_LOADED",
+        "SIGNAL_GENERATED",
+        "SIGNAL_VALIDATION",
+        "RISK_CHECK",
+        "ORDER_BUILT",
+        "EXCHANGE_VALIDATION",
+        "ORDER_SENT",
+        "OKX_RESPONSE"
+    ]
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.steps = {}
+        self.fail_reason = None
+        self.fail_step = None
+        self.success = False
+
+    def log_step(self, step: str, data: Any) -> None:
+        if step not in self.STEPS:
+            return
+        self.steps[step] = {
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'data': data
+        }
+        log_debug(f"[TRACE] {step}: {str(data)[:200]}")
+
+    def log_fail(self, step: str, reason: str) -> None:
+        self.fail_step = step
+        self.fail_reason = reason
+        self.success = False
+        log_warning(f"[TRACE] ❌ FALLÓ en {step}: {reason}")
+
+    def log_success(self, step: str, data: Any) -> None:
+        self.steps[step] = {
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'data': data
+        }
+        self.success = True
+        log_debug(f"[TRACE] ✅ {step}: {str(data)[:200]}")
+
+    def get_summary(self) -> Dict:
+        return {
+            'success': self.success,
+            'fail_step': self.fail_step,
+            'fail_reason': self.fail_reason,
+            'steps_completed': list(self.steps.keys())
+        }
+
+    def diagnose(self) -> str:
+        """Diagnóstico automático de la causa de fallo."""
+        if self.success:
+            return "OK"
+        if self.fail_step is None:
+            return "UNKNOWN (no steps logged)"
+
+        if self.fail_step == "SYMBOL_SELECTED":
+            return "STRATEGY_ISSUE: No se seleccionó ningún símbolo"
+        elif self.fail_step == "MARKET_DATA_LOADED":
+            return "DATA_ISSUE: No se pudieron cargar datos de mercado"
+        elif self.fail_step == "SIGNAL_GENERATED":
+            return "STRATEGY_ISSUE: No se generó señal válida"
+        elif self.fail_step == "SIGNAL_VALIDATION":
+            return "FILTER_ISSUE: La señal fue bloqueada por filtros internos"
+        elif self.fail_step == "RISK_CHECK":
+            return "RISK_ISSUE: El control de riesgo bloqueó la operación"
+        elif self.fail_step == "ORDER_BUILT":
+            return "VALIDATION_ISSUE: Error en la construcción de la orden"
+        elif self.fail_step == "EXCHANGE_VALIDATION":
+            return "EXCHANGE_ISSUE: Validación previa a OKX falló (instrumento, tamaño, etc)"
+        elif self.fail_step == "ORDER_SENT":
+            return "EXCHANGE_ISSUE: OKX rechazó la orden (revisar logs)"
+        elif self.fail_step == "OKX_RESPONSE":
+            return "EXCHANGE_ISSUE: Respuesta de OKX con error"
+        else:
+            return f"UNKNOWN (step: {self.fail_step})"
+
+# ============================================================
+# BOT PRINCIPAL
+# ============================================================
 class KrishnaKillingSpree:
     def __init__(self, api_key: str, secret_key: str, passphrase: str, demo: bool = True):
         self.api_key = api_key
@@ -30,440 +143,553 @@ class KrishnaKillingSpree:
         self.passphrase = passphrase
         self.demo = demo
 
-        self.exchange = None
-        self.strategy = None
+        self.exchange = Exchange(api_key, secret_key, passphrase, demo)
+        self.strategy = Strategy()
         self.risk = None
-        self.metrics = None
 
-        self.capital = config.CAPITAL_INICIAL
+        self.capital = CAPITAL_INICIAL
         self.last_equity = self.capital
+        self.pnl_total = 0.0
+        self.trades_count = 0
         self.position = None
         self.instrument_info = {}
-        self.trades_count = 0
-        self.pnl_total = 0.0
         self._last_mode = "NORMAL"
 
-        init_pnl_file()
+        # Estadísticas de diagnóstico
+        self.stats = {
+            'symbols_processed': 0,
+            'signals_generated': 0,
+            'orders_attempted': 0,
+            'orders_sent': 0,
+            'okx_rejections': 0,
+            'blocked_by_strategy': 0,
+            'blocked_by_validator': 0,
+            'blocked_by_risk': 0,
+            'blocked_by_cooldown': 0,
+            'invalid_symbols': 0,
+            'traces': []
+        }
+
+        self.valid_instruments = {}
 
     # ============================================================
-    # INICIALIZACIÓN
+    # INICIALIZACIÓN (CORREGIDA — LECTURA DE BALANCE)
     # ============================================================
-
     def init(self) -> bool:
         log_info("🔥 KRISHNA KILLING SPREE — INICIO")
-        log_info(f"Timestamp: {datetime.now().isoformat()}")
-
-        self.exchange = Exchange(self.api_key, self.secret_key, self.passphrase, self.demo)
+        log_info(f"Timestamp: {datetime.now(timezone.utc).isoformat()}")
 
         if not self.exchange.connect():
             log_error("Fallo en la conexión con OKX.")
             return False
-
         log_info("Conexión OKX establecida.")
 
-        self.strategy = Strategy()
-        self.metrics = MetricsCollector()
-
+        # ============================================================
+        # 🔍 LECTURA DE BALANCE CORREGIDA CON LOGS Y DOBLE FORMATO
+        # ============================================================
         bal = self.exchange.get_balance()
-        if bal and 'USDT' in bal:
-            self.capital = float(bal['USDT'].get('available', config.CAPITAL_INICIAL))
+        log_debug(f"Balance response: {bal}")
+
+        if bal.get('ok'):
+            data = bal.get('data', [])
+            found = False
+
+            # Formato estándar de OKX
+            for detail in data:
+                for asset in detail.get('details', []):
+                    if asset.get('ccy') == 'USDT':
+                        self.capital = safe_float(asset.get('availBal'))
+                        self.last_equity = self.capital
+                        log_info(f"✅ Capital disponible: {self.capital:.2f} USDT")
+                        found = True
+                        break
+                if found:
+                    break
+
+            # Formato alternativo (simplificado)
+            if not found and 'USDT' in bal:
+                self.capital = safe_float(bal['USDT'].get('available'))
+                self.last_equity = self.capital
+                log_info(f"✅ Capital disponible (alternativo): {self.capital:.2f} USDT")
+                found = True
+
+            if not found:
+                log_warning("No se encontró USDT en la respuesta de balance.")
+                self.capital = CAPITAL_INICIAL
+                self.last_equity = self.capital
+        else:
+            log_error(f"Error al obtener balance: {bal.get('error')}")
+            self.capital = CAPITAL_INICIAL
             self.last_equity = self.capital
-            log_info(f"Capital disponible: {self.capital:.2f} USDT")
+
+        # Si el capital sigue siendo el inicial (por fallo), mostrar advertencia
+        if self.capital == CAPITAL_INICIAL:
+            log_warning(f"⚠️ Usando capital inicial por defecto: {CAPITAL_INICIAL:.2f} USDT")
+
+        # Obtener info de instrumentos
+        log_info("Obteniendo información de instrumentos...")
+        for sym in SYMBOLS:
+            try:
+                info = self.exchange.get_instrument_info(sym)
+                if info and info.get('lot_size', 0) > 0:
+                    self.instrument_info[sym] = info
+                    self.valid_instruments[sym] = True
+                    log_debug(f"✅ {sym}: lotSize={info.get('lot_size')}, minSz={info.get('min_sz')}")
+                else:
+                    self.valid_instruments[sym] = False
+                    log_warning(f"❌ {sym}: INSTRUMENTO INVÁLIDO o sin información")
+                    self.stats['invalid_symbols'] += 1
+            except Exception as e:
+                self.valid_instruments[sym] = False
+                log_error(f"Error obteniendo info de {sym}: {e}")
+                self.stats['invalid_symbols'] += 1
 
         self.risk = RiskController(self.capital)
-
-        for sym in config.SYMBOLS:
-            info = self.exchange.get_instrument_info(sym)
-            self.instrument_info[sym] = {
-                'ct_val': info.get('ctVal', 0.01),
-                'lot_sz': info.get('lotSz', 0.001),
-                'min_sz': info.get('minSz', 0.001),
-            }
-
-        log_info(f"Universo: {len(config.SYMBOLS)} activos")
-        log_info(f"Apalancamiento base: {config.BASE_LEVERAGE}x")
-
-        update_dashboard("INICIANDO", equity=self.capital, modo="NORMAL")
+        log_info(f"Universo: {len(SYMBOLS)} activos (válidos: {sum(1 for v in self.valid_instruments.values() if v)})")
+        log_info(f"Apalancamiento base: {BASE_LEVERAGE}x")
         return True
+
+    # ============================================================
+    # VALIDACIÓN DE SÍMBOLO
+    # ============================================================
+    def validate_symbol(self, symbol: str) -> bool:
+        return self.valid_instruments.get(symbol, False)
+
+    # ============================================================
+    # PROCESAMIENTO DE UN SÍMBOLO (RESILIENTE)
+    # ============================================================
+    def process_symbol(self, symbol: str) -> Dict:
+        trace = TradeTrace()
+        result = {
+            'symbol': symbol,
+            'executed': False,
+            'trace': trace,
+            'reason': None
+        }
+
+        try:
+            trace.log_step("SYMBOL_SELECTED", {"symbol": symbol})
+            self.stats['symbols_processed'] += 1
+
+            if not self.validate_symbol(symbol):
+                trace.log_fail("SYMBOL_SELECTED", f"Símbolo {symbol} inválido o no encontrado")
+                self.stats['blocked_by_validator'] += 1
+                result['reason'] = 'INVALID_SYMBOL'
+                return result
+
+            if self.strategy.is_on_cooldown(symbol):
+                trace.log_fail("SYMBOL_SELECTED", f"Símbolo {symbol} en cooldown")
+                self.stats['blocked_by_cooldown'] += 1
+                result['reason'] = 'COOLDOWN'
+                return result
+
+            # MARKET_DATA_LOADED
+            try:
+                candles = self.exchange._request("GET", "/api/v5/market/candles",
+                                                 params={"instId": symbol, "bar": "5m", "limit": 100})
+                if not candles.get('ok') or not candles.get('data'):
+                    trace.log_fail("MARKET_DATA_LOADED", "No se pudieron obtener velas")
+                    self.stats['blocked_by_strategy'] += 1
+                    result['reason'] = 'NO_DATA'
+                    return result
+
+                candles_data = candles['data']
+                if len(candles_data) < 50:
+                    trace.log_fail("MARKET_DATA_LOADED", f"Solo {len(candles_data)} velas (mínimo 50)")
+                    self.stats['blocked_by_strategy'] += 1
+                    result['reason'] = 'INSUFFICIENT_DATA'
+                    return result
+
+                candle_dict = {
+                    'ts': [c[0] for c in candles_data],
+                    'o': [float(c[1]) for c in candles_data],
+                    'h': [float(c[2]) for c in candles_data],
+                    'l': [float(c[3]) for c in candles_data],
+                    'c': [float(c[4]) for c in candles_data],
+                    'v': [float(c[5]) for c in candles_data],
+                }
+                trace.log_step("MARKET_DATA_LOADED", {"count": len(candles_data), "last_close": candle_dict['c'][-1]})
+            except Exception as e:
+                trace.log_fail("MARKET_DATA_LOADED", str(e))
+                self.stats['blocked_by_strategy'] += 1
+                result['reason'] = 'DATA_FETCH_ERROR'
+                return result
+
+            # SIGNAL_GENERATED
+            try:
+                features = self.strategy.compute_features(candle_dict)
+                if not features:
+                    trace.log_fail("SIGNAL_GENERATED", "No se pudieron calcular features")
+                    self.stats['blocked_by_strategy'] += 1
+                    result['reason'] = 'FEATURES_ERROR'
+                    return result
+
+                score = self.strategy.compute_score(features)
+                trace.log_step("SIGNAL_GENERATED", {"score": score, "direction": features.get('trend_direction')})
+                self.stats['signals_generated'] += 1
+
+                if score < MIN_SCORE:
+                    trace.log_fail("SIGNAL_VALIDATION", f"Score {score:.3f} < {MIN_SCORE}")
+                    self.stats['blocked_by_strategy'] += 1
+                    result['reason'] = 'LOW_SCORE'
+                    return result
+
+                trace.log_success("SIGNAL_VALIDATION", f"Score {score:.3f} > {MIN_SCORE}")
+
+                # RISK_CHECK
+                params = self.risk.get_effective_parameters()
+                if not params['trading_enabled']:
+                    trace.log_fail("RISK_CHECK", "Trading deshabilitado por modo de riesgo")
+                    self.stats['blocked_by_risk'] += 1
+                    result['reason'] = 'RISK_DISABLED'
+                    return result
+
+                if score < MIN_SCORE + params.get('min_score_boost', 0):
+                    trace.log_fail("RISK_CHECK", f"Score {score:.3f} < {MIN_SCORE + params.get('min_score_boost', 0):.3f} (con boost)")
+                    self.stats['blocked_by_risk'] += 1
+                    result['reason'] = 'RISK_BOOST'
+                    return result
+
+                trace.log_success("RISK_CHECK", {"mode": self.risk.mode, "leverage": params['leverage']})
+
+                # ORDER_BUILT
+                try:
+                    ticker = self.exchange._request("GET", "/api/v5/market/ticker", params={"instId": symbol})
+                    if not ticker.get('ok') or not ticker.get('data'):
+                        trace.log_fail("ORDER_BUILT", "No se pudo obtener ticker")
+                        self.stats['blocked_by_validator'] += 1
+                        result['reason'] = 'NO_TICKER'
+                        return result
+
+                    entry = safe_float(ticker['data'][0].get('last'))
+                    if entry <= 0:
+                        trace.log_fail("ORDER_BUILT", f"Precio inválido: {entry}")
+                        self.stats['blocked_by_validator'] += 1
+                        result['reason'] = 'INVALID_PRICE'
+                        return result
+
+                    direction = features.get('trend_direction', 1)
+                    side = 'buy' if direction == 1 else 'sell'
+                    pos_side = "long" if side == 'buy' else "short"
+
+                    info = self.instrument_info.get(symbol, {})
+                    ct_val = info.get('ct_val', 0.01)
+                    lot_sz = info.get('lot_size', 0.001)
+                    min_sz = info.get('min_sz', 0.001)
+
+                    available = self.capital * 0.98
+                    desired_notional = available * params['leverage'] * params['size_factor']
+                    size = desired_notional / (entry * ct_val)
+                    size = max(min_sz, round(size / lot_sz) * lot_sz)
+
+                    if size <= 0:
+                        trace.log_fail("ORDER_BUILT", f"Tamaño inválido: {size}")
+                        self.stats['blocked_by_validator'] += 1
+                        result['reason'] = 'INVALID_SIZE'
+                        return result
+
+                    atr = features.get('atr', entry * 0.01)
+                    tp_base = entry + atr * TP_MULT if side == 'buy' else entry - atr * TP_MULT
+                    sl_base = entry - atr * SL_MULT if side == 'buy' else entry + atr * SL_MULT
+
+                    tick_size = info.get('tick_size', 0.01)
+                    tp_price = round(tp_base / tick_size) * tick_size
+                    sl_price = round(sl_base / tick_size) * tick_size
+
+                    min_distance = entry * 0.01
+                    if side == 'buy':
+                        if tp_price <= entry + min_distance:
+                            tp_price = entry + min_distance * 2
+                        if sl_price >= entry - min_distance:
+                            sl_price = entry - min_distance * 2
+                    else:
+                        if tp_price >= entry - min_distance:
+                            tp_price = entry - min_distance * 2
+                        if sl_price <= entry + min_distance:
+                            sl_price = entry + min_distance * 2
+
+                    trace.log_step("ORDER_BUILT", {
+                        'entry': entry,
+                        'size': size,
+                        'side': side,
+                        'tp': tp_price,
+                        'sl': sl_price,
+                        'leverage': params['leverage']
+                    })
+                    self.stats['orders_attempted'] += 1
+
+                    # EXCHANGE_VALIDATION
+                    inst_info = self.exchange.get_instrument_info(symbol)
+                    if not inst_info or inst_info.get('lot_size', 0) <= 0:
+                        trace.log_fail("EXCHANGE_VALIDATION", "Instrumento no válido en OKX")
+                        self.stats['blocked_by_validator'] += 1
+                        result['reason'] = 'INSTRUMENT_INVALID'
+                        return result
+
+                    if size < inst_info.get('min_sz', 0):
+                        trace.log_fail("EXCHANGE_VALIDATION", f"Size {size} < min_sz {inst_info.get('min_sz')}")
+                        self.stats['blocked_by_validator'] += 1
+                        result['reason'] = 'SIZE_TOO_SMALL'
+                        return result
+
+                    trace.log_success("EXCHANGE_VALIDATION", "Validación OK")
+
+                    # ORDER_SENT
+                    log_info(f"📈 TRADE: {symbol} | {side.upper()} | Entry: {entry:.2f} | Size: {size:.4f} | TP: {tp_price:.2f} | SL: {sl_price:.2f}")
+
+                    order_res = self.exchange.place_market_order_with_tp_sl(
+                        symbol, side, size, tp_price, sl_price
+                    )
+
+                    trace.log_step("ORDER_SENT", {"response": order_res})
+                    self.stats['orders_sent'] += 1
+
+                    # OKX_RESPONSE
+                    if not order_res.get('ok'):
+                        trace.log_fail("OKX_RESPONSE", f"OKX error: {order_res.get('error')}")
+                        self.stats['okx_rejections'] += 1
+                        result['reason'] = 'OKX_REJECTED'
+                        raw = order_res.get('raw')
+                        if raw:
+                            log_error(f"OKX Raw: {json.dumps(raw, indent=2)}")
+                        return result
+
+                    trace.log_success("OKX_RESPONSE", {"ordId": order_res.get('data', [{}])[0].get('ordId')})
+                    self.trades_count += 1
+                    self.position = {'symbol': symbol, 'side': side}
+                    result['executed'] = True
+                    log_success(f"✅ Trade ejecutado en {symbol}")
+                    return result
+
+                except Exception as e:
+                    trace.log_fail("ORDER_BUILT", str(e))
+                    self.stats['blocked_by_validator'] += 1
+                    result['reason'] = 'ORDER_BUILD_ERROR'
+                    log_error(f"Error en ORDER_BUILT: {e}")
+                    traceback.print_exc()
+                    return result
+
+            except Exception as e:
+                trace.log_fail("SIGNAL_GENERATED", str(e))
+                self.stats['blocked_by_strategy'] += 1
+                result['reason'] = 'SIGNAL_ERROR'
+                log_error(f"Error en SIGNAL_GENERATED: {e}")
+                return result
+
+        except Exception as e:
+            trace.log_fail("SYMBOL_SELECTED", f"Error general: {e}")
+            result['reason'] = 'GENERAL_ERROR'
+            log_error(f"Error procesando {symbol}: {e}")
+            traceback.print_exc()
+            return result
+
+        finally:
+            self.stats['traces'].append(trace)
+            result['trace'] = trace
+            return result
 
     # ============================================================
     # CLEANUP
     # ============================================================
-
-    def phase_cleanup(self) -> Dict:
+    def _cleanup(self) -> None:
         log_debug("[CLEANUP] Reconciliación de estado")
-
-        # Obtener posiciones
-        positions = self.exchange.get_positions()
-        pos_data = positions.get('data', []) if positions.get('ok') else []
-
-        if pos_data:
-            log_info(f"Posición encontrada en OKX: {len(pos_data)} activa(s)")
-
-        # Órdenes pendientes
-        pending = self.exchange.get_pending_orders()
-        pending_data = pending.get('data', []) if pending.get('ok') else []
-
-        # Órdenes algorítmicas
-        algo = self.exchange.get_pending_algo_orders()
-        algo_data = algo.get('data', []) if algo.get('ok') else []
-
-        # Cancelar órdenes huérfanas (sin posición)
-        pos_symbols = {p.get('instId') for p in pos_data if float(p.get('pos', 0)) > 0}
-        cancelled = 0
-
-        for order in pending_data:
-            if order.get('instId') not in pos_symbols:
-                self.exchange.cancel_order(order.get('ordId'))
-                cancelled += 1
-                log_debug(f"Orden huérfana cancelada: {order.get('ordId')}")
-
-        for order in algo_data:
-            if order.get('instId') not in pos_symbols:
-                self.exchange.cancel_algo_order(order.get('algoId'))
-                cancelled += 1
-                log_debug(f"Orden algorítmica huérfana cancelada: {order.get('algoId')}")
-
-        if cancelled:
-            log_info(f"Órdenes huérfanas canceladas: {cancelled}")
-
-        # Asegurar solo 1 posición
-        if len(pos_data) > config.MAX_POSITIONS:
-            log_warning(f"Más de {config.MAX_POSITIONS} posición. Cerrando excedentes.")
-            for pos in pos_data[config.MAX_POSITIONS:]:
-                self.exchange.close_position_market(
-                    pos.get('instId'),
-                    pos.get('posSide', 'long'),
-                    abs(float(pos.get('pos', 0)))
-                )
-
-        return {'positions_found': len(pos_data), 'orders_cancelled': cancelled}
-
-    # ============================================================
-    # SCORING
-    # ============================================================
-
-    def phase_scoring(self) -> Dict:
-        log_debug("[SCORING] Análisis de mercado")
-        start = time.time()
-
-        features_dict = {}
-        for sym in config.SYMBOLS:
-            try:
-                candles = self.exchange.fetch_historical_candles(sym, limit=100)
-                if candles:
-                    feat = self.strategy.compute_features(candles)
-                    if feat:
-                        features_dict[sym] = feat
-            except Exception as e:
-                log_debug(f"Error fetching {sym}: {e}")
-
-        result = self.strategy.select_top_asset(features_dict)
-
-        if result:
-            symbol, score, features = result
-            log_debug(f"Mejor activo: {symbol} (score: {score:.3f})")
-            return {
-                'symbol': symbol,
-                'score': score,
-                'features': features,
-                'features_dict': features_dict,
-                'symbols_scanned': len(features_dict),
-            }
-        else:
-            log_debug("No se encontraron señales válidas")
-            return {
-                'symbol': None,
-                'score': 0.0,
-                'features': None,
-                'features_dict': features_dict,
-                'symbols_scanned': len(features_dict),
-            }
-
-    # ============================================================
-    # EJECUCIÓN
-    # ============================================================
-
-    def phase_execute(self, scoring_result: Dict) -> Dict:
-        log_debug("[EJECUCIÓN] Control de riesgo")
-
-        # Actualizar balance
-        bal = self.exchange.get_balance()
-        if bal and 'USDT' in bal:
-            equity = float(bal['USDT'].get('available', self.capital))
-            self.capital = equity
-            risk_metrics = self.risk.update(equity)
-        else:
-            risk_metrics = self.risk.get_metrics()
-
-        # Detectar cambio de modo
-        current_mode = risk_metrics['mode']
-        if self._last_mode != current_mode:
-            log_info(f"Cambio de modo: {self._last_mode} → {current_mode}")
-            self._last_mode = current_mode
-
-        # Kill switch
-        if self.risk.is_kill_switch_activated():
-            log_error(f"⛔ KILL SWITCH: {self.risk.get_kill_reason()}")
-            update_dashboard("KILL", equity=self.capital, pnl_total=self.pnl_total,
-                             trades=self.trades_count, modo="KILL")
-            self._emergency_shutdown()
-            return {'trade_executed': False, 'kill_switch': True}
-
-        # Parámetros efectivos
-        params = self.risk.get_effective_parameters()
-        if not params['trading_enabled']:
-            log_debug("Trading deshabilitado por modo de riesgo")
-            return {'trade_executed': False}
-
-        symbol = scoring_result.get('symbol')
-        score = scoring_result.get('score', 0)
-        features = scoring_result.get('features')
-
-        if not symbol or score < config.MIN_SCORE + params.get('min_score_boost', 0):
-            log_debug(f"Score insuficiente: {score:.3f}")
-            return {'trade_executed': False}
-
-        if self.strategy.is_on_cooldown(symbol):
-            log_debug(f"{symbol} en cooldown")
-            return {'trade_executed': False}
-
-        # Verificar que no haya posición activa
-        positions = self.exchange.get_positions()
-        if positions.get('ok') and positions.get('data'):
-            log_info(f"Posición activa detectada. No se abre nuevo trade.")
-            return {'trade_executed': False}
-
-        # Ejecutar trade
-        success = self._execute_trade(
-            symbol, score, features,
-            params['leverage'],
-            params['size_factor']
-        )
-
-        if success:
-            self.strategy.set_cooldown(symbol)
-            log_info(f"✅ Nueva posición abierta: {symbol}")
-            update_dashboard("RUNNING", symbol=symbol,
-                             side='long' if features.get('trend_direction', 1) == 1 else 'short',
-                             equity=self.capital, pnl_total=self.pnl_total,
-                             trades=self.trades_count, modo=self.risk.mode)
-            return {'trade_executed': True, 'symbol': symbol, 'score': score}
-        else:
-            log_warning(f"❌ Falló ejecución de trade en {symbol}")
-            return {'trade_executed': False}
-
-    # ============================================================
-    # EJECUCIÓN DE TRADE
-    # ============================================================
-
-    def _execute_trade(self, symbol: str, score: float, features: Dict,
-                       leverage: int, size_factor: float) -> bool:
         try:
-            ticker = self.exchange.get_ticker(symbol)
-            if not ticker:
-                log_error(f"No se pudo obtener ticker para {symbol}")
-                return False
+            positions = self.exchange.get_positions()
+            pos_data = positions.get('data', []) if positions.get('ok') else []
+            if pos_data:
+                log_info(f"Posiciones encontradas: {len(pos_data)}")
 
-            entry = float(ticker.get('last', 0))
-            if entry <= 0:
-                log_error(f"Precio inválido para {symbol}: {entry}")
-                return False
+            pos_symbols = {p.get('instId') for p in pos_data if safe_float(p.get('pos', 0)) > 0}
 
-            direction = features.get('trend_direction', 1)
-            side = 'long' if direction == 1 else 'short'
+            pending = self.exchange._request("GET", "/api/v5/trade/orders-pending")
+            if pending.get('ok'):
+                for order in pending.get('data', []):
+                    if order.get('instId') not in pos_symbols:
+                        self.exchange.cancel_order(order.get('ordId'), order.get('instId'))
+                        log_debug(f"Orden huérfana cancelada: {order.get('ordId')}")
 
-            info = self.instrument_info.get(symbol, {'ct_val': 0.01, 'lot_sz': 0.001, 'min_sz': 0.001})
-            ct_val = info['ct_val']
-            lot_sz = info['lot_sz']
-            min_sz = info['min_sz']
-
-            available = self.capital * 0.98
-            desired_notional = available * leverage * size_factor
-            size = desired_notional / (entry * ct_val)
-            size = max(min_sz, round(size / lot_sz) * lot_sz)
-
-            if size <= 0:
-                log_error(f"Tamaño inválido para {symbol}: {size}")
-                return False
-
-            log_info(f"TRADE: {symbol} | {side.upper()} | Entry: {entry:.2f} | Size: {size:.4f}")
-
-            # Market order
-            order_res = self.exchange.place_market_order(symbol, side, size)
-            if not order_res.get('ok'):
-                log_error(f"Error en market order: {order_res.get('error')}")
-                return False
-
-            # TP y SL
-            atr = features.get('atr', entry * 0.01)
-            if side == 'long':
-                tp_price = entry + atr * config.TP_MULT
-                sl_price = entry - atr * config.SL_MULT
-                tp_side = 'sell'
-            else:
-                tp_price = entry - atr * config.TP_MULT
-                sl_price = entry + atr * config.SL_MULT
-                tp_side = 'buy'
-
-            tp_res = self.exchange.place_conditional_order(symbol, tp_side, size, tp_price, pos_side=side)
-            if not tp_res.get('ok'):
-                log_error(f"Error en TP: {tp_res.get('error')}")
-                self.exchange.close_position_market(symbol, side, size)
-                return False
-
-            sl_res = self.exchange.place_conditional_order(symbol, tp_side, size, sl_price, pos_side=side)
-            if not sl_res.get('ok'):
-                log_error(f"Error en SL: {sl_res.get('error')}")
-                self.exchange.cancel_algo_order(tp_res.get('algo_id'))
-                self.exchange.close_position_market(symbol, side, size)
-                return False
-
-            # Trailing solo en modo NORMAL y leverage >= 5
-            if self.risk.mode == "NORMAL" and leverage >= 5:
-                callback_ratio = (0.5 * atr / entry) * 100
-                callback_ratio = max(0.3, min(5.0, callback_ratio))
-                activation = entry + (tp_price - entry) * 0.5 if side == 'long' else entry - (entry - tp_price) * 0.5
-                self.exchange.place_trailing_order(symbol, tp_side, size, callback_ratio, activation)
-
-            self.trades_count += 1
-            self.metrics.log_trade({
-                'symbol': symbol,
-                'side': side,
-                'entry': entry,
-                'size': size,
-                'leverage': leverage,
-                'size_factor': size_factor,
-                'score': score,
-                'tp': tp_price,
-                'sl': sl_price,
-            })
-
-            return True
+            algo = self.exchange.get_all_pending_algo_orders()
+            if algo.get('ok'):
+                for order in algo.get('data', []):
+                    if order.get('instId') not in pos_symbols:
+                        self.exchange.cancel_algo_order(order.get('algoId'), order.get('instId'))
+                        log_debug(f"Orden algorítmica huérfana cancelada: {order.get('algoId')}")
 
         except Exception as e:
-            log_error(f"Error en execute_trade: {e}")
-            return False
+            log_error(f"Error en cleanup: {e}")
 
     # ============================================================
-    # EMERGENCIA
+    # PNL Y MÉTRICAS
     # ============================================================
+    def _append_pnl_row(self, equity: float, pnl_total: float, pnl_ejecucion: float,
+                        trades: int, modo: str) -> None:
+        os.makedirs(METRICS_DIR, exist_ok=True)
+        filename = f"{METRICS_DIR}/pnl_history.csv"
+        file_exists = os.path.exists(filename)
+        with open(filename, 'a', newline='') as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(['fecha', 'hora', 'equity', 'pnl_acumulado', 'pnl_ejecucion', 'trades', 'modo_riesgo'])
+            now = datetime.now(timezone.utc)
+            writer.writerow([
+                now.strftime('%Y-%m-%d'),
+                now.strftime('%H:%M:%S'),
+                round(equity, 2),
+                round(pnl_total, 2),
+                round(pnl_ejecucion, 2),
+                trades,
+                modo
+            ])
 
-    def _emergency_shutdown(self):
-        log_info("⛔ Cierre de emergencia...")
-        self.exchange.close_all_positions()
-        self.exchange.cancel_all_orders()
-        log_info("✅ Cierre completado.")
+    def _save_metrics(self) -> None:
+        os.makedirs(METRICS_DIR, exist_ok=True)
+        filename = f"{METRICS_DIR}/report_final_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
+        with open(filename, 'w') as f:
+            json.dump({
+                'trades_count': self.trades_count,
+                'pnl_total': self.pnl_total,
+                'capital': self.capital,
+                'stats': self.stats
+            }, f, indent=2)
 
     # ============================================================
-    # RUN
+    # DIAGNÓSTICO
     # ============================================================
+    def _diagnose_no_trades(self) -> None:
+        log_info("=" * 60)
+        log_info("🔍 DIAGNÓSTICO: No se ejecutaron trades")
+        log_info("=" * 60)
 
+        reasons = defaultdict(int)
+        for trace in self.stats['traces']:
+            if not trace.success:
+                diag = trace.diagnose()
+                reasons[diag] += 1
+
+        log_info("Causas detectadas:")
+        for reason, count in sorted(reasons.items(), key=lambda x: -x[1]):
+            log_info(f"  {count}x → {reason}")
+
+        log_info("")
+        log_info("Estadísticas detalladas:")
+        log_info(f"  Símbolos procesados: {self.stats['symbols_processed']}")
+        log_info(f"  Señales generadas: {self.stats['signals_generated']}")
+        log_info(f"  Órdenes intentadas: {self.stats['orders_attempted']}")
+        log_info(f"  Órdenes enviadas: {self.stats['orders_sent']}")
+        log_info(f"  Rechazos OKX: {self.stats['okx_rejections']}")
+        log_info(f"  Bloqueados por estrategia: {self.stats['blocked_by_strategy']}")
+        log_info(f"  Bloqueados por validador: {self.stats['blocked_by_validator']}")
+        log_info(f"  Bloqueados por riesgo: {self.stats['blocked_by_risk']}")
+        log_info(f"  Bloqueados por cooldown: {self.stats['blocked_by_cooldown']}")
+        log_info(f"  Símbolos inválidos: {self.stats['invalid_symbols']}")
+
+        log_info("")
+        log_info("📌 Recomendaciones:")
+        if self.stats['blocked_by_strategy'] > 0 and self.stats['signals_generated'] == 0:
+            log_info("  • El scoring no genera señales. Revisa MIN_SCORE o los indicadores.")
+        if self.stats['blocked_by_validator'] > 0:
+            log_info("  • La validación previa bloqueó órdenes. Verifica símbolos y tamaños.")
+        if self.stats['okx_rejections'] > 0:
+            log_info("  • OKX rechazó órdenes. Revisa los logs de error para más detalles.")
+        if self.stats['invalid_symbols'] > 0:
+            log_info("  • Algunos símbolos son inválidos. Verifica SYMBOLS en config.py.")
+        log_info("=" * 60)
+
+    def _print_summary(self) -> None:
+        log_info("=" * 60)
+        log_info("📊 RESUMEN DEL CICLO")
+        log_info("=" * 60)
+        log_info(f"  Capital actual: {self.capital:.2f} USDT")
+        log_info(f"  Trades ejecutados: {self.trades_count}")
+        log_info(f"  PnL total: {self.pnl_total:.2f} USDT")
+        log_info(f"  Modo riesgo: {self.risk.mode}")
+        log_info(f"  Drawdown: {self.risk.dd_actual:.2f}%")
+        log_info("=" * 60)
+
+    # ============================================================
+    # RUN — LOOP RESILIENTE
+    # ============================================================
     def run(self) -> Dict:
         start_time = time.time()
 
         if not self.init():
             return {'success': False, 'error': 'init_failed'}
 
-        # Cleanup
-        self.phase_cleanup()
+        self._cleanup()
 
         if self.risk.is_kill_switch_activated():
-            self.metrics.save_final_report()
+            self._save_metrics()
             log_info("🔥 KRISHNA KILLING SPREE — FIN (KILL)")
             return {'success': False, 'error': 'kill_switch'}
 
-        # Scoring
-        scoring_result = self.phase_scoring()
+        log_info("🔄 Procesando símbolos...")
 
-        # Ejecución
-        execution_result = self.phase_execute(scoring_result)
+        results = []
+        for symbol in SYMBOLS:
+            log_debug(f"--- Procesando {symbol} ---")
+            result = self.process_symbol(symbol)
+            results.append(result)
 
-        # Actualizar PnL
-        if execution_result.get('trade_executed'):
-            bal = self.exchange.get_balance()
-            if bal and 'USDT' in bal:
-                equity = float(bal['USDT'].get('available', self.capital))
-                pnl_ejecucion = equity - self.last_equity
-                self.pnl_total += pnl_ejecucion
-                self.last_equity = equity
+            if result.get('executed'):
+                bal = self.exchange.get_balance()
+                if bal.get('ok'):
+                    data = bal.get('data', [])
+                    for detail in data:
+                        for asset in detail.get('details', []):
+                            if asset.get('ccy') == 'USDT':
+                                equity = safe_float(asset.get('availBal'))
+                                pnl_ejecucion = equity - self.last_equity
+                                self.pnl_total += pnl_ejecucion
+                                self.last_equity = equity
+                                self._append_pnl_row(equity, self.pnl_total, pnl_ejecucion, self.trades_count, self.risk.mode)
+                                break
 
-                append_pnl_row(
-                    equity=equity,
-                    pnl_total=self.pnl_total,
-                    pnl_ejecucion=pnl_ejecucion,
-                    trades=self.trades_count,
-                    modo=self.risk.mode
-                )
+            if result.get('executed'):
+                log_info("✅ Trade ejecutado, deteniendo escaneo.")
+                break
 
-        # Métricas de ciclo
-        cycle_data = {
-            'symbols_scanned': scoring_result.get('symbols_scanned', 0),
-            'best_symbol': scoring_result.get('symbol'),
-            'best_score': scoring_result.get('score', 0),
-            'trade_executed': execution_result.get('trade_executed', False),
-            'trade_symbol': execution_result.get('symbol'),
-            'latency_ms': (time.time() - start_time) * 1000,
-            'mode': self.risk.mode,
-            'dd_actual': self.risk.dd_actual,
-        }
-        self.metrics.log_cycle(cycle_data)
+        if not any(r.get('executed') for r in results):
+            self._diagnose_no_trades()
 
         elapsed = time.time() - start_time
         log_info(f"CICLO COMPLETADO en {elapsed:.2f}s")
 
-        update_dashboard("FINALIZADO",
-                         equity=self.capital,
-                         pnl_total=self.pnl_total,
-                         trades=self.trades_count,
-                         modo=self.risk.mode)
-
-        self.metrics.save_final_report()
+        self._print_summary()
+        self._save_metrics()
         log_info("🔥 KRISHNA KILLING SPREE — FIN")
 
         return {
             'success': True,
             'mode': self.risk.mode,
             'dd': self.risk.dd_actual,
-            'trade_executed': execution_result.get('trade_executed', False),
-            'symbol': execution_result.get('symbol'),
+            'trade_executed': any(r.get('executed') for r in results),
+            'symbol': next((r.get('symbol') for r in results if r.get('executed')), None),
             'elapsed_seconds': elapsed,
+            'stats': self.stats
         }
-
 
 # ============================================================
 # ENTRY POINT
 # ============================================================
-
 def main():
-    API_KEY = os.environ.get('OKX_API_KEY')
-    SECRET_KEY = os.environ.get('OKX_SECRET_KEY')
-    PASSPHRASE = os.environ.get('OKX_PASSPHRASE')
+    API_KEY = os.environ.get('OKX_API_KEY', "2d57031a-deb4-438e-9449-6dc3e525f2fb")
+    SECRET_KEY = os.environ.get('OKX_SECRET_KEY', "2CEFC57765518B204872EF804910ECEF")
+    PASSPHRASE = os.environ.get('OKX_PASSPHRASE', "Waly200381!")
     DEMO = os.environ.get('OKX_DEMO', 'true').lower() == 'true'
 
     if not all([API_KEY, SECRET_KEY, PASSPHRASE]):
         log_error("Faltan credenciales OKX.")
-        log_error("Set: OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHRASE")
         sys.exit(1)
 
-    lock_fd = acquire_lock()
-    if lock_fd is None:
-        log_warning("Otra instancia del bot está ejecutándose. Saliendo.")
-        sys.exit(0)
-
-    try:
-        bot = KrishnaKillingSpree(API_KEY, SECRET_KEY, PASSPHRASE, DEMO)
-        result = bot.run()
-        log_info(f"Resultado: {result}")
-    except Exception as e:
-        log_error(f"Error inesperado: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
-    finally:
-        release_lock(lock_fd)
-        log_info("Ejecución finalizada.")
-
+    bot = KrishnaKillingSpree(API_KEY, SECRET_KEY, PASSPHRASE, DEMO)
+    result = bot.run()
+    log_info(f"Resultado: {result}")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        log_info("Interrupción manual")
+    except Exception as e:
+        log_error(f"Error inesperado: {e}")
+        traceback.print_exc()
