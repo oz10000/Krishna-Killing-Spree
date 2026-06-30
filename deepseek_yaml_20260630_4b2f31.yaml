@@ -1,0 +1,117 @@
+# .github/workflows/blackbird.yml
+# ============================================================
+# BLACKBIRD BOT V2 — GITHUB ACTIONS WORKFLOW
+# ============================================================
+# CRON TEST MATRIX: 2, 3, 5, 6, 15 minutos
+# ============================================================
+
+name: BlackBird Bot V2
+
+on:
+  schedule:
+    # ────────────────────────────────────────────────────────
+    # MATRIZ DE FRECUENCIAS (descomentar la deseada)
+    # ────────────────────────────────────────────────────────
+
+    # 🔵 2 minutos (máxima frecuencia)
+    # - cron: "*/2 * * * *"
+
+    # 🟢 3 minutos
+    # - cron: "*/3 * * * *"
+
+    # 🟡 5 minutos (DEFAULT)
+    - cron: "*/5 * * * *"
+
+    # 🟠 6 minutos
+    # - cron: "*/6 * * * *"
+
+    # 🔴 15 minutos
+    # - cron: "*/15 * * * *"
+
+  # Ejecución manual desde GitHub UI
+  workflow_dispatch:
+    inputs:
+      frequency:
+        description: 'Frecuencia de prueba (minutos)'
+        required: false
+        default: '5'
+        type: choice
+        options:
+          - '2'
+          - '3'
+          - '5'
+          - '6'
+          - '15'
+
+# ============================================================
+# CONCURRENCIA — evitar ejecuciones solapadas
+# ============================================================
+concurrency:
+  group: blackbird-bot
+  cancel-in-progress: false  # Permitir solapamiento solo si es necesario
+
+# ============================================================
+# JOB PRINCIPAL
+# ============================================================
+jobs:
+  run-bot:
+    name: Ejecutar BlackBird Bot
+    runs-on: ubuntu-latest
+    timeout-minutes: 5  # 5 minutos máximo por ejecución
+
+    steps:
+      - name: ⬇️ Checkout repositorio
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 📦 Instalar dependencias
+        run: |
+          pip install --upgrade pip
+          pip install requests numpy
+
+      - name: 📁 Crear directorios
+        run: |
+          mkdir -p metrics logs snapshots
+
+      - name: 🤖 Ejecutar BlackBird Bot
+        run: python main.py
+        env:
+          OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+          OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
+          OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
+          OKX_DEMO: ${{ secrets.OKX_DEMO || 'true' }}
+
+      - name: 📊 Subir métricas (si existen)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: blackbird-metrics-${{ github.run_id }}
+          path: |
+            metrics/
+            logs/
+            snapshots/
+          retention-days: 30
+          compression-level: 9
+
+      - name: 📋 Reporte de ejecución
+        if: always()
+        run: |
+          echo "## 📊 BlackBird Bot — Reporte de Ejecución" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Métrica | Valor |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Timestamp | $(date -u '+%Y-%m-%d %H:%M:%S UTC') |" >> $GITHUB_STEP_SUMMARY
+          echo "| Workflow | ${{ github.workflow }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Run ID | ${{ github.run_id }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Frecuencia | ${{ github.event.schedule || 'manual' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Demo | ${{ secrets.OKX_DEMO || 'true' }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: 🔔 Notificación de fallo (opcional)
+        if: failure()
+        run: |
+          echo "❌ El bot falló en la ejecución. Revisar logs."
