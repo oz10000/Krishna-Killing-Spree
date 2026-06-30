@@ -1,8 +1,3 @@
-# .github/workflows/krishna.yml
-# ============================================================
-# KRISHNA KILLING SPREE — GITHUB ACTIONS WORKFLOW
-# ============================================================
-
 name: Krishna Killing Spree
 
 on:
@@ -46,7 +41,7 @@ jobs:
           OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
           OKX_DEMO: ${{ secrets.OKX_DEMO || 'true' }}
 
-      - name: 📊 Subir métricas y logs
+      - name: 📊 Subir artefactos
         uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -56,14 +51,3 @@ jobs:
             logs/
             snapshots/
           retention-days: 30
-
-      - name: 📋 Reporte de ejecución
-        if: always()
-        run: |
-          echo "## 🔥 Krishna Killing Spree — Reporte" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Métrica | Valor |" >> $GITHUB_STEP_SUMMARY
-          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Timestamp | $(date -u '+%Y-%m-%d %H:%M:%S UTC') |" >> $GITHUB_STEP_SUMMARY
-          echo "| Workflow | ${{ github.workflow }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Run ID | ${{ github.run_id }} |" >> $GITHUB_STEP_SUMMARY
